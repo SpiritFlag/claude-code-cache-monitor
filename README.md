@@ -1,0 +1,124 @@
+# cc-monitor
+
+Claude Code 트랜스크립트(`~/.claude/projects/**/*.jsonl`)를 실시간으로 지켜보는 계기판.
+입력은 없고 모니터링만 한다. 형은 계속 VS Code/터미널에서 치고, 이 창은 옆 모니터에 띄워둔다.
+
+- 캐시 TTL 카운트다운, 깨뜨리면 얼마인지
+- 컨텍스트 크기와 구성(시스템/내 프롬프트/툴 결과/리마인더…) 톱니 그래프
+- 세션 비용, 다른 모델이었다면 얼마
+- 압축 추천(폐기물, 손익분기)과 모델 올릴 때의 행동지침
+- 캐시를 깨는 나쁜 습관 순위 (이 세션 / 폴더 전체)
+- 상태 8개짜리 캐릭터
+
+의존성 없음. **Node 18 이상**만 있으면 된다.
+
+## 파일
+
+| 파일 | 역할 |
+|---|---|
+| `server.js` | 폴더 watch + 증분 파싱 + SSE 서버 |
+| `index.html` | 화면 (요청마다 읽으므로 수정 후 새로고침만 하면 됨) |
+| `start-monitor.cmd` | Windows 실행 |
+| `start-monitor.sh` | Linux/macOS 실행 |
+| `character-spec.md` | 캐릭터 상태 정의 + 제미나이 프롬프트 |
+| `img/*.png` | 캐릭터 이미지 (512px, 투명) |
+
+## Windows
+
+```
+start-monitor.cmd
+```
+
+기본값은 `%USERPROFILE%\.claude\projects`, 포트 7777. 브라우저가 자동으로 열린다.
+다른 폴더나 포트:
+
+```
+start-monitor.cmd "D:\some\projects" 7780
+```
+
+## Ubuntu (Lightsail 등 서버)
+
+```bash
+chmod +x start-monitor.sh
+./start-monitor.sh                 # ~/.claude/projects, 포트 7777
+./start-monitor.sh ~/other 7780    # 폴더, 포트 지정
+```
+
+서버에는 브라우저가 없으니 **로컬 PC에서 SSH 포트 포워딩**으로 본다:
+
+```bash
+ssh -L 7777:localhost:7777 ubuntu@<lightsail-ip>
+```
+
+그 다음 로컬 브라우저에서 `http://localhost:7777`.
+서버는 localhost에만 바인딩되므로 외부에 노출되지 않는다.
+
+백그라운드로 계속 띄워두려면:
+
+```bash
+nohup node ~/cc-monitor/server.js > ~/cc-monitor.log 2>&1 &
+```
+
+systemd로 등록하려면 `/etc/systemd/system/cc-monitor.service`:
+
+```ini
+[Unit]
+Description=cc-monitor
+After=network.target
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/node /home/ubuntu/cc-monitor/server.js --port 7777
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now cc-monitor
+```
+
+Linux에서 `fs.watch` 재귀 감시가 안 되는 Node 버전이면 자동으로 2초 폴링으로 내려간다. 로그에 `polling every 2s`가 찍히면 그 상태.
+
+## 옵션
+
+```
+node server.js [--dir <projectsDir>] [--port <port>]
+```
+
+## 캐시 깨짐 막기 (효과 제일 큰 설정)
+
+bkit 스킬들이 프론트매터에 `effort: medium`을 박아놔서 스킬을 드나들 때마다 effort가 바뀌고 컨텍스트 전체가 다시 써진다.
+`~/.claude/settings.json`에 아래를 넣으면 스킬이 effort를 못 덮어쓴다 (`effortLevel` 키는 스킬이 덮어쓰므로 쓰지 말 것).
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "high"
+  }
+}
+```
+
+기존 키는 그대로 두고 `env`만 추가. 이미 `env`가 있으면 그 안에 한 줄.
+확인: 새 세션에서 `/bkit:pdca`를 쳤을 때 State 띠의 effort가 안 바뀌고 캐릭터가 "아야"를 안 하면 성공.
+
+## 보정값
+
+시스템 바닥 / 압축 후 요약 크기 / 다시 읽기 양은 **지켜보는 폴더에서 실측한 중앙값**을 쓴다.
+샘플이 없으면 기본값(45k / 20k / 80k)을 쓰고 팝업에 "기본값, 샘플 없음"으로 표시된다.
+콜드스타트 세션 하나, 압축 한 번이 생기면 그때부터 실측으로 바뀐다.
+
+## 캐릭터 이미지 추가/교체
+
+1. `character-spec.md`의 공통 프롬프트 + 해당 상태의 표정 문장을 제미나이에 넣어 생성
+2. 생성물이 격자 배경을 그려서 주면 `img/`에 넣고 `tools/dechecker.ps1` 실행 (원본은 `img/raw/`로 이동, 512px 투명 PNG로 변환)
+3. 없는 상태의 이미지는 `idle.png`로 대체된다
+
+## 숫자 읽을 때
+
+- 달러는 API 정가 환산. 구독제면 사용량 한도 소모 감각으로 볼 것.
+- 캐시 깨짐 비용 = 다시 쓴 토큰 × (쓰기 단가 − 읽기 단가). 1시간 캐시 기준 쓰기 2배, 읽기 0.1배(Fable 5.1은 0.025배).
+- 컨텍스트 구성은 문자 수 비율을 실제 컨텍스트에 맞춰 늘린 추정치. 합계는 정확, 비율은 몇 % 오차.
+- 압축은 캐시가 살아있을 때 해야 이득. 만료 후 압축은 그 호출이 전체를 다시 쓴다.
+- 만료 후 이어가기 vs 새 세션의 손익분기는 컨텍스트 = 바닥 + 다시 읽기. 그 아래면 이어가고, 위면 새 세션.

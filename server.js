@@ -1,0 +1,355 @@
+#!/usr/bin/env node
+// cc-monitor: watches Claude Code transcripts and serves a live cockpit.
+// usage: node server.js [--dir <projectsDir>] [--port 7777]
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const os = require('os');
+
+const args = process.argv.slice(2);
+const argv = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
+const ROOT = path.resolve(argv('--dir', path.join(os.homedir(), '.claude', 'projects')));
+const PORT = parseInt(argv('--port', '7777'), 10);
+
+// $/MTok base input price; cache write 1h = 2x, 5m = 1.25x; cache read = 0.1x (Fable 5.1: 0.025x); output listed separately
+const PRICE = {
+  'claude-fable-5-1': { in: 10, out: 50, read: 0.025 },
+  'claude-fable-5': { in: 10, out: 50, read: 0.1 },
+  'claude-opus-5': { in: 5, out: 25, read: 0.1 },
+  'claude-sonnet-5': { in: 2, out: 10, read: 0.1 },
+  'claude-haiku-4-5-20251001': { in: 1, out: 5, read: 0.1 },
+};
+const price = (m) => PRICE[m] || { in: 5, out: 25, read: 0.1 };
+const PREFIX_EVENTS = new Set(['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'date_change', 'auto_mode', 'auto_mode_exit', 'nested_memory', 'invoked_skills']);
+
+// ---------------- state ----------------
+const files = new Map();     // file -> { offset, rest, sessionId, isSub, chainKey, seen:Set, prev, pending:[], lastUserTs }
+const sessions = new Map();  // sessionId -> session state
+let version = 0;
+
+function session(id) {
+  let s = sessions.get(id);
+  if (!s) {
+    s = {
+      id, title: '', cwd: '', entry: '', model: '', effort: '', skill: '', mode: '',
+      firstTs: 0, lastTs: 0, lastCallStart: 0, lastCallEnd: 0, lastStop: '', lastTool: '',
+      ctx: 0, ttlMin: 5, calls: 0, subCalls: 0, out: 0, think: 0, cacheRead: 0, cacheWrite: 0, cost: 0,
+      prompts: 0, compacts: 0, asks: 0, series: [], breaks: [], breakCost: 0, subActive: 0,
+      tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {},
+      sysTokens: 0, sysSet: false, comp: null, toolTop: [], compScale: 0,
+      coldStartCw: 0, firstTotal: 0, startRegrowth: null, compactions: [], byCause: {},
+      saved: 0, commits: 0, lateCalls: 0, nightCalls: 0, streak: 0, bestStreak: 0,
+      lastAvoidableBreakTs: 0, pendingAsk: false, fullFlag: false,
+    };
+    sessions.set(id, s);
+  }
+  return s;
+}
+
+function tokensOf(u) {
+  const cc = u.cache_creation || {};
+  return {
+    in: u.input_tokens || 0, cw: u.cache_creation_input_tokens || 0, cr: u.cache_read_input_tokens || 0, out: u.output_tokens || 0,
+    cw1h: cc.ephemeral_1h_input_tokens || 0, cw5m: cc.ephemeral_5m_input_tokens || 0,
+    think: (u.output_tokens_details || {}).thinking_tokens || 0,
+  };
+}
+
+// ---- context composition (estimated from transcript text; scaled to the real context size at each call)
+const COMP_KEYS = ['user', 'assistant', 'toolInput', 'toolResult', 'reminders', 'summary', 'images'];
+const IMAGE_CHARS = 5600; // ~1600 tokens per pasted image, in char-equivalents
+function newComp() { const c = {}; for (const k of COMP_KEYS) c[k] = 0; return c; }
+function blockLen(b) {
+  if (!b) return 0;
+  if (typeof b === 'string') return b.length;
+  if (Array.isArray(b)) return b.reduce((n, x) => n + blockLen(x), 0);
+  if (b.type === 'text') return (b.text || '').length;
+  if (b.type === 'tool_result') return blockLen(b.content);
+  if (b.type === 'image') return IMAGE_CHARS;
+  return 0;
+}
+// ---- compaction advice: dead weight in context + cost flow
+const OLD_CALLS = 40;   // tool results older than this many calls count as stale
+const REGROWTH_CALLS = 15; // how many calls after a (re)start we measure regrowth over
+// Calibration: measured from the watched folder itself (medians). Defaults are used only when the folder has no sample, and are flagged in the UI.
+const DEFAULTS = { sys: 45000, summary: 20000, regrowth: 80000 };
+const CAL = { sys: DEFAULTS.sys, summary: DEFAULTS.summary, regrowth: DEFAULTS.regrowth, n: { sys: 0, summary: 0, regrowth: 0 } };
+const median = a => { if (!a.length) return null; const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
+function calibrate() {
+  const sys = [], summary = [], regrowth = [];
+  for (const s of sessions.values()) {
+    if (s.coldStartCw) sys.push(s.coldStartCw);
+    for (const c of s.compactions) { if (c.summary != null) summary.push(c.summary); if (c.regrowth != null) regrowth.push(c.regrowth); }
+    if (s.startRegrowth != null) regrowth.push(s.startRegrowth);
+  }
+  const m = median(sys); CAL.sys = m != null ? m : DEFAULTS.sys; CAL.n.sys = sys.length;
+  const ms = median(summary); CAL.summary = ms != null ? ms : DEFAULTS.summary; CAL.n.summary = summary.length;
+  const mr = median(regrowth); CAL.regrowth = mr != null ? mr : DEFAULTS.regrowth; CAL.n.regrowth = regrowth.length;
+}
+function compactAdvice(f, s, total, scale) {
+  const SUMMARY_TOKENS = CAL.summary, SUMMARY_OUT = CAL.summary, REGROWTH = CAL.regrowth; // summary output ≈ summary size in context
+  const lastRead = {}; for (const r of f.results) if (r.name === 'Read' && r.path) lastRead[r.path] = r.idx;
+  let dupRead = 0, staleRead = 0, oldResults = 0, dupN = 0, staleN = 0, oldN = 0;
+  for (const r of f.results) {
+    if (r.name === 'Read' && r.path) {
+      if (lastRead[r.path] > r.idx) { dupRead += r.chars; dupN++; }
+      else if ((f.edited[r.path] || -1) > r.idx) { staleRead += r.chars; staleN++; }
+    } else if (f.callIdx - r.idx > OLD_CALLS) { oldResults += r.chars; oldN++; }
+  }
+  const tok = c => Math.round(c * scale);
+  const dead = tok(dupRead + staleRead + oldResults);
+  const p = price(s.model || 'claude-sonnet-5');
+  const postCtx = Math.min(total, s.sysTokens + SUMMARY_TOKENS);
+  const perCallNow = total * p.in * p.read / 1e6, perCallAfter = postCtx * p.in * p.read / 1e6;
+  const compactionCost = (SUMMARY_OUT * p.out + postCtx * p.in * 2 + REGROWTH * p.in * 2) / 1e6;
+  const perCallSave = Math.max(0, perCallNow - perCallAfter);
+  const breakEven = perCallSave > 0 ? Math.ceil(compactionCost / perCallSave) : Infinity;
+  const callsPerTurn = s.prompts ? s.calls / s.prompts : 10;
+  const horizon = 50;
+  const saving = perCallSave * horizon - compactionCost;
+  return { dead, dupRead: tok(dupRead), staleRead: tok(staleRead), oldResults: tok(oldResults), dupN, staleN, oldN, deadPct: total ? dead / total : 0,
+    perCallNow, perCallAfter, compactionCost, breakEven, callsPerTurn, horizon, saving, postCtx,
+    recommend: total > 100000 && saving > compactionCost && (dead / total > 0.25 || breakEven <= 15) }; // saving must at least double the compaction cost
+}
+
+// ---- model switch advice: is downgrading worth it, and how (continue / new session / compact then switch)
+const SWITCH_MODELS = [['claude-fable-5', 'fable'], ['claude-opus-5', 'opus'], ['claude-sonnet-5', 'sonnet']]; // haiku deliberately excluded: never a real candidate
+const family = m => (m || '').startsWith('claude-fable') ? 'claude-fable-5' : m;
+
+// ---- escalation advice: "I'm stuck, I want a stronger model" — how to do it without paying for the whole context twice
+function escalationAdvice(s, total) {
+  const cur = s.model; const pc = price(cur);
+  const sys = s.sysTokens || CAL.sys, SUMMARY = CAL.summary, REGROWTH = CAL.regrowth;
+  const used = {}; let allCalls = 0; for (const x of sessions.values()) for (const [m, n] of Object.entries(x.modelCalls)) { used[family(m)] = (used[family(m)] || 0) + n; allCalls += n; }
+  const models = SWITCH_MODELS.filter(([m]) => m !== family(cur) && price(m).in > pc.in && (used[m] || 0) >= allCalls * 0.01).map(([m, label]) => {
+    const p = price(m); const w = x => x * p.in * 2 / 1e6; const wc = x => x * pc.in * 2 / 1e6;
+    const opts = [
+      { name: 'effort 올리기 (모델 유지)', go: wc(total), back: 0, keep: true, note: '같은 모델에서 재작성만. 먼저 시도할 것' },
+      { name: '옆 세션 상담', go: w(sys), back: 0, keep: true, note: '문제만 붙여넣고 답 받아오기. 이 세션은 TTL 안에 돌아오면 캐시 그대로' },
+      { name: '압축 후 전환', go: (SUMMARY * pc.out + (sys + SUMMARY + REGROWTH) * p.in * 2) / 1e6, back: wc(sys + SUMMARY + REGROWTH), keep: false, note: '요약은 남음' },
+      { name: '새 세션', go: w(sys + REGROWTH), back: wc(sys + REGROWTH), keep: false, note: '맥락 포기' },
+      { name: '이어가기', go: w(total), back: wc(total), keep: true, note: '컨텍스트 전체를 두 번 다시 씀' },
+    ].map(o => ({ ...o, total: o.go + o.back }));
+    const cheapest = opts.slice(1).reduce((a, b) => b.total < a.total ? b : a); // excluding the effort step (not a model switch)
+    return { model: m, label, options: opts, best: cheapest.name, bestCost: cheapest.total, inSession: opts[4].total, effortCost: opts[0].go };
+  });
+  return { models, ttlMin: s.ttlMin };
+}
+
+function scaledComp(f, total, sys) {
+  const chars = f.comp; let sum = 0; for (const k of COMP_KEYS) sum += chars[k];
+  const avail = Math.max(0, total - sys); const scale = sum ? avail / sum : 0;
+  const out = { sys }; for (const k of COMP_KEYS) out[k] = Math.round(chars[k] * scale);
+  const tools = Object.entries(f.toolChars).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, c]) => ({ name, tokens: Math.round(c * scale) }));
+  return { comp: out, tools, scale };
+}
+
+function callCost(model, t) {
+  const p = price(model);
+  return (t.in * p.in + t.cw1h * p.in * 2 + t.cw5m * p.in * 1.25 + (t.cw - t.cw1h - t.cw5m) * p.in * 1.25 + t.cr * p.in * p.read + t.out * p.out) / 1e6;
+}
+
+function handleRecord(f, d) {
+  if (d.sessionId) f.sessionId = d.sessionId;
+  if (!f.sessionId) return;
+  const s = session(f.sessionId);
+  const ts = d.timestamp ? Date.parse(d.timestamp) : 0;
+  if (ts) { if (!s.firstTs || ts < s.firstTs) s.firstTs = ts; if (ts > s.lastTs) s.lastTs = ts; }
+
+  switch (d.type) {
+    case 'custom-title': s.title = d.customTitle; return;
+    case 'ai-title': if (!s.title) s.title = d.aiTitle; return;
+    case 'mode': s.mode = d.mode; return;
+    case 'system':
+      if (d.subtype === 'compact_boundary') { s.compacts++; f.pending.push('compact'); }
+      return;
+    case 'attachment':
+      if (d.attachment && PREFIX_EVENTS.has(d.attachment.type)) f.pending.push('prefix:' + d.attachment.type);
+      if (!f.isSub && d.attachment) { const a = d.attachment; const v = a.content != null ? a.content : (a.text != null ? a.text : ''); f.comp.reminders += typeof v === 'string' ? v.length : JSON.stringify(v).length; } // hook stdout is not shown to the model
+      return;
+    case 'user': {
+      if (d.cwd) s.cwd = d.cwd; if (d.entrypoint) s.entry = d.entrypoint;
+      if (d.isCompactSummary) f.pending.push('compact');
+      if (!f.isSub) f.lastUserTs = ts;
+      const c = d.message && d.message.content;
+      const human = !d.isMeta && !f.isSub && (typeof c === 'string' || (Array.isArray(c) && c.every(b => b.type === 'text' || b.type === 'image')));
+      if (human) s.prompts++;
+      if (!f.isSub && Array.isArray(c) && c.some(b => b.type === 'tool_result')) s.pendingAsk = false;
+      if (!f.isSub && c !== undefined) {
+        if (d.isCompactSummary) { f.comp = newComp(); f.toolChars = {}; f.results = []; f.edited = {}; f.comp.summary += blockLen(c); }
+        else if (typeof c === 'string') { f.comp[d.isMeta ? 'reminders' : 'user'] += c.length; }
+        else if (Array.isArray(c)) for (const b of c) {
+          if (b.type === 'text') f.comp[d.isMeta ? 'reminders' : 'user'] += (b.text || '').length;
+          else if (b.type === 'image') f.comp.images += IMAGE_CHARS;
+          else if (b.type === 'tool_result') { const n = blockLen(b.content); f.comp.toolResult += n; const tn = f.toolNames[b.tool_use_id] || { name: '?' }; f.toolChars[tn.name] = (f.toolChars[tn.name] || 0) + n; f.results.push({ idx: f.callIdx, name: tn.name, path: tn.path, chars: n }); }
+        }
+      }
+      return;
+    }
+    case 'assistant': {
+      const m = d.message; if (!m || !m.usage || m.model === '<synthetic>') return;
+      if (Array.isArray(m.content)) for (const b of m.content) {
+        if (b.type === 'tool_use') {
+          s.lastTool = b.name; if (b.name === 'AskUserQuestion') { s.asks++; if (!f.isSub) s.pendingAsk = true; }
+          if (!f.isSub) {
+            const fp = b.input && b.input.file_path ? String(b.input.file_path).replace(/\\/g, '/').toLowerCase() : undefined;
+            f.toolNames[b.id] = { name: b.name, path: fp }; f.comp.toolInput += JSON.stringify(b.input || {}).length;
+            if ((b.name === 'Edit' || b.name === 'Write') && fp) f.edited[fp] = f.callIdx;
+          }
+          if (b.name === 'Bash' && /git commit/.test((b.input && b.input.command) || '')) s.commits++;
+        }
+        else if (b.type === 'text' && !f.isSub) f.comp.assistant += (b.text || '').length;
+      }
+      if (f.seen.has(m.id)) return; f.seen.add(m.id);
+      const t = tokensOf(m.usage); const total = t.in + t.cw + t.cr;
+      const cost = callCost(m.model, t);
+      s.cost += cost; s.out += t.out; s.think += t.think; s.cacheRead += t.cr; s.cacheWrite += t.cw;
+      s.tok.in += t.in; s.tok.cw1h += t.cw1h; s.tok.cw5m += t.cw5m; s.tok.cwOther += Math.max(0, t.cw - t.cw1h - t.cw5m); s.tok.cr += t.cr; s.tok.out += t.out;
+      s.modelCalls[m.model] = (s.modelCalls[m.model] || 0) + 1;
+      { const pp = price(m.model); s.saved += t.cr * pp.in * (1 - pp.read) / 1e6; } // what caching saved vs. paying list price for those tokens
+      if (ts) { const h = (new Date(ts).getUTCHours() + 9) % 24; if (h >= 19 || h < 6) s.lateCalls++; if (h < 6) s.nightCalls++; }
+      let brokeNow = false;
+      if (f.isSub) { s.subCalls++; s.subActive = ts; } else { s.calls++; }
+      if (t.cw1h > 0) s.ttlMin = 60; else if (t.cw5m > 0 && t.cw1h === 0 && s.calls <= 1) s.ttlMin = 5;
+      const prev = f.prev; const events = f.pending; f.pending = [];
+      if (prev) {
+        // tokens that should have been cache hits, capped at what was actually written this call (compaction shrinks the context)
+        const rewrite = Math.min(Math.max(0, prev.total - t.cr), t.cw + t.in);
+        if (rewrite > 2000) {
+          const gapMin = (ts - prev.ts) / 60000; let cause;
+          if (m.model !== prev.model) cause = 'model_switch';
+          else if (events.includes('compact')) cause = 'compact';
+          else if (gapMin > (s.ttlMin === 60 ? 60 : 5)) cause = 'ttl_expiry';
+          else if (d.effort !== prev.effort) cause = 'effort_change';
+          else { const p = events.find(e => e.startsWith('prefix:')); cause = p ? p.slice(7) : 'unexplained'; }
+          const p = price(m.model); const mult = t.cw1h > 0 ? 2 : 1.25;
+          const extra = rewrite * p.in * (mult - p.read) / 1e6;
+          s.breakCost += extra;
+          const bc = s.byCause[cause] = s.byCause[cause] || { n: 0, rewrite: 0, extra: 0 }; bc.n++; bc.rewrite += rewrite; bc.extra += extra;
+          if (cause !== 'compact' && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
+          s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total });
+          if (s.breaks.length > 60) s.breaks.shift();
+        }
+      }
+      f.prev = { total, model: m.model, ts, effort: d.effort };
+      if (!f.isSub) {
+        if (brokeNow) s.streak = 0; else s.streak++; if (s.streak > s.bestStreak) s.bestStreak = s.streak;
+        s.model = m.model; s.effort = d.effort || ''; s.skill = d.attributionSkill || ''; s.ctx = total; s.lastStop = m.stop_reason || '';
+        s.lastCallStart = (f.lastUserTs && f.lastUserTs <= ts) ? f.lastUserTs : ts; s.lastCallEnd = ts;
+        // system prompt + tools + CLAUDE.md: measurable only on a true cold start (first call, no cache read); resumed sessions get the measured median
+        if (!s.sysSet) { s.sysSet = true; const cold = s.calls === 1 && t.cr === 0; if (cold) s.coldStartCw = t.cw + t.in; s.sysTokens = cold ? t.cw + t.in : Math.min(CAL.sys, total); s.firstTotal = total; }
+        if (s.calls === REGROWTH_CALLS + 1 && s.startRegrowth == null) s.startRegrowth = Math.max(0, total - s.firstTotal);
+        if (events.includes('compact')) s.compactions.push({ at: s.calls, post: total, summary: Math.max(0, total - s.sysTokens), regrowth: null });
+        for (const c of s.compactions) if (c.regrowth == null && s.calls === c.at + REGROWTH_CALLS) c.regrowth = Math.max(0, total - c.post);
+        f.callIdx++;
+        const sc = scaledComp(f, total, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale;
+        s.advice = compactAdvice(f, s, total, sc.scale);
+        s.switch = escalationAdvice(s,total);
+        s.series.push({ t: ts, ctx: total, cw: t.cw, cr: t.cr, m: m.model, c: [sc.comp.sys, ...COMP_KEYS.map(k => sc.comp[k])] });
+        if (s.series.length > 4000) s.series.splice(0, s.series.length - 4000);
+      }
+      return;
+    }
+    default: return;
+  }
+}
+
+function readFile(fp) {
+  let f = files.get(fp);
+  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
+  let st; try { st = fs.statSync(fp); } catch { return; }
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
+  if (st.size === f.offset) return;
+  const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
+  fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
+  const text = f.rest + buf.toString('utf8'); const lines = text.split('\n'); f.rest = lines.pop();
+  for (const l of lines) { if (!l.trim()) continue; let d; try { d = JSON.parse(l); } catch { continue; } handleRecord(f, d); }
+  version++;
+}
+
+function scan(dir) {
+  let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of ents) { const p = path.join(dir, e.name); if (e.isDirectory()) scan(p); else if (e.name.endsWith('.jsonl')) readFile(p); }
+}
+
+// ---------------- character state (see character-spec.md; first matching rule wins) ----------------
+function charState(s, now) {
+  const alive = now - s.lastCallStart < s.ttlMin * 60e3; const left = s.lastCallStart + s.ttlMin * 60e3 - now;
+  const busy = s.lastStop === 'tool_use' && now - s.lastTs < 3 * 60e3;
+  if (now - s.lastAvoidableBreakTs < 3 * 60e3) return 'broke';
+  if (s.pendingAsk && now - s.lastTs < 6 * 3600e3) return 'asking';
+  if (busy) return 'working';
+  s.fullFlag = s.ctx >= 400000 || (s.fullFlag && s.ctx >= 380000);
+  if (alive && s.fullFlag) return 'full';
+  if (alive && left < 12 * 60e3) return 'sleepy';
+  if (!alive) return s.ctx < (s.sysTokens || CAL.sys) + CAL.regrowth ? 'asleep' : 'amnesia';
+  return 'idle';
+}
+
+// ---------------- snapshot ----------------
+function snapshot() {
+  const now = Date.now();
+  const list = [...sessions.values()].filter(s => s.calls > 0).sort((a, b) => b.lastTs - a.lastTs).map(s => ({
+    id: s.id, title: s.title || '(untitled)', cwd: s.cwd, entry: s.entry, model: s.model, effort: s.effort, skill: s.skill,
+    firstTs: s.firstTs, lastTs: s.lastTs, lastCallStart: s.lastCallStart, lastCallEnd: s.lastCallEnd, lastStop: s.lastStop, lastTool: s.lastTool,
+    ctx: s.ctx, ttlMin: s.ttlMin, calls: s.calls, subCalls: s.subCalls, out: s.out, think: s.think, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite,
+    cost: s.cost, prompts: s.prompts, compacts: s.compacts, asks: s.asks, breakCost: s.breakCost,
+    riskUsd: s.ctx * price(s.model).in * 2 / 1e6,
+    tok: s.tok, mainModel: Object.entries(s.modelCalls).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || s.model,
+    comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, switch: s.switch || null, sysTokens: s.sysTokens, byCause: s.byCause,
+    continueThreshold: (s.sysTokens || CAL.sys) + CAL.regrowth,
+    saved: s.saved, commits: s.commits, lateCalls: s.lateCalls, nightCalls: s.nightCalls, streak: s.streak, bestStreak: s.bestStreak,
+    charState: charState(s, now), // after TTL expiry: continuing beats a new session iff ctx < system floor + regrowth (price/horizon independent)
+    busy: s.lastStop === 'tool_use' && now - s.lastTs < 3 * 60e3, subActive: now - s.subActive < 3 * 60e3,
+  }));
+  return { version, root: ROOT, now, calibration: CAL, sessions: list };
+}
+function detail(id) {
+  const s = sessions.get(id); if (!s) return null;
+  const pts = s.series; const step = Math.max(1, Math.ceil(pts.length / 600));
+  const series = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
+  return { id, series, breaks: s.breaks.slice(-40) };
+}
+
+// ---------------- server ----------------
+const clients = new Set();
+function broadcast() { const data = 'data: ' + JSON.stringify(snapshot()) + '\n\n'; for (const res of clients) res.write(data); }
+let debounce = null;
+function onChange() { clearTimeout(debounce); debounce = setTimeout(() => { scan(ROOT); calibrate(); recomputeAdvice(); broadcast(); }, 150); }
+// advice depends on calibration, which depends on all sessions: recompute after every scan
+function recomputeAdvice() {
+  for (const [fp, f] of files) {
+    if (f.isSub || !f.prev || !f.sessionId) continue; const s = sessions.get(f.sessionId); if (!s || !s.calls) continue;
+    if (!s.coldStartCw) { s.sysTokens = Math.min(CAL.sys, s.ctx); const sc = scaledComp(f, s.ctx, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale; } // resumed sessions: system floor comes from calibration
+    s.advice = compactAdvice(f, s, s.ctx, s.compScale); s.switch = escalationAdvice(s,s.ctx);
+  }
+}
+
+const HTML_PATH = path.join(__dirname, 'index.html');
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(HTML_PATH, 'utf8')); }
+  if (url.pathname.startsWith('/img/')) {
+    const name = path.basename(url.pathname); const fp = path.join(__dirname, 'img', name);
+    const fb = path.join(__dirname, 'img', 'idle.png'); const file = fs.existsSync(fp) ? fp : fs.existsSync(fb) ? fb : null;
+    if (!file) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=3600' }); return res.end(fs.readFileSync(file));
+  }
+  if (url.pathname === '/api/state') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(snapshot())); }
+  if (url.pathname === '/api/detail') { const d = detail(url.searchParams.get('id')); res.writeHead(d ? 200 : 404, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(d || { error: 'no such session' })); }
+  if (url.pathname === '/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write('data: ' + JSON.stringify(snapshot()) + '\n\n'); clients.add(res); req.on('close', () => clients.delete(res)); return;
+  }
+  res.writeHead(404); res.end();
+});
+
+console.log('[cc-monitor] scanning', ROOT);
+scan(ROOT); calibrate(); recomputeAdvice();
+console.log('[cc-monitor] sessions:', sessions.size, 'files:', files.size);
+console.log('[cc-monitor] calibration (folder medians): sys=' + CAL.sys + ' (n=' + CAL.n.sys + ') summary=' + CAL.summary + ' (n=' + CAL.n.summary + ') regrowth=' + CAL.regrowth + ' (n=' + CAL.n.regrowth + ')');
+try { fs.watch(ROOT, { recursive: true }, onChange); console.log('[cc-monitor] watching (recursive)'); }
+catch (e) { console.log('[cc-monitor] recursive watch unavailable, polling every 2s'); setInterval(onChange, 2000); }
+setInterval(() => { if (clients.size) broadcast(); }, 15000); // keep busy/idle flags fresh
+server.listen(PORT, () => console.log('[cc-monitor] http://localhost:' + PORT));

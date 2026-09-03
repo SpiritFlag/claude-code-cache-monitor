@@ -1,0 +1,7 @@
+# generated / local
+img/raw/
+tools/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

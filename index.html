@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cc-monitor</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e8ee; --dim:#8b93a7; --ok:#3ddc84; --warn:#ffc857; --bad:#ff5c5c; --acc:#6ea8fe; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font: 14px/1.4 system-ui, "Segoe UI", sans-serif; }
+  .app { display:grid; grid-template-columns: 300px 1fr; height:100vh; }
+  aside { border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+  aside #list { flex:1; overflow:auto; }
+  .side-habits { border-top:1px solid var(--line); background:#131620; padding:10px 12px 12px; font-size:12px; }
+  .side-habits h1 { padding:0 0 6px; }
+  .side-habits table { font-size:11px; } .side-habits td, .side-habits th { padding:3px 4px; }
+  .score { display:flex; gap:14px; align-items:center; }
+  .score .grade { font: 800 52px/1 var(--mono); }
+  .score .pts { font: 600 18px var(--mono); color:var(--dim); }
+  .srow { display:grid; grid-template-columns: 92px 1fr 44px; gap:8px; align-items:center; font-size:12px; margin-top:6px; }
+  .srow .bar { margin:0; height:8px; } .srow em { font: 11px var(--mono); color:var(--dim); font-style:normal; text-align:right; }
+  .char { display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .char .bubble { background:#232836; border-radius:12px; padding:9px 14px; position:relative; font-size:14px; font-weight:600; text-align:center; max-width:100%; }
+  .char .bubble::after { content:''; position:absolute; left:50%; bottom:-8px; margin-left:-8px; border:8px solid transparent; border-top-color:#232836; border-bottom:0; }
+  .char img { width:170px; height:170px; image-rendering:auto; }
+  .hero { display:flex; gap:14px; align-items:center; }
+  .hero .lv { font: 800 44px/1 var(--mono); color:var(--acc); } .hero .lv small { font-size:14px; color:var(--dim); margin-right:4px; }
+  .stats { display:grid; grid-template-columns:repeat(2,1fr); gap:6px; margin-top:12px; }
+  .stats > div { background:#232836; border-radius:6px; padding:6px 9px; display:flex; justify-content:space-between; align-items:baseline; }
+  .stats span { font-size:11px; color:var(--dim); } .stats b { font: 600 13px var(--mono); }
+  .badges { display:flex; flex-wrap:wrap; gap:5px; margin-top:10px; }
+  .badge { font-size:11px; padding:3px 8px; border-radius:999px; background:#1c202a; color:#4a5160; border:1px solid var(--line); }
+  .badge.on { color:var(--warn); border-color:#5a4a1e; background:#2a2415; }
+  .fun { display:flex; flex-wrap:wrap; gap:6px 12px; margin-top:10px; font: 11px var(--mono); color:var(--dim); }
+  .fun b { color:var(--fg); font-weight:600; }
+  aside h1 { font-size:13px; letter-spacing:.08em; color:var(--dim); margin:0; padding:14px 16px 8px; text-transform:uppercase; }
+  aside .root { font:11px var(--mono); color:var(--dim); padding:0 16px 10px; word-break:break-all; }
+  .sess { padding:10px 16px; border-top:1px solid var(--line); cursor:pointer; }
+  .sess:hover { background:#1b1f28; } .sess.sel { background:#1f2532; border-left:3px solid var(--acc); padding-left:13px; }
+  .sess .t { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .m { font:11px var(--mono); color:var(--dim); margin-top:3px; display:flex; gap:8px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#444; margin-right:6px; vertical-align:middle; }
+  .dot.live { background:var(--ok); } .dot.busy { background:var(--acc); animation:pulse 1s infinite; } .dot.dead { background:#444; }
+  @keyframes pulse { 50% { opacity:.3; } }
+  main { padding:20px 24px; overflow:auto; display:flex; flex-direction:column; gap:16px; }
+  .top { display:grid; grid-template-columns: 280px 1fr 1fr 240px; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card h2 { margin:0 0 6px; font-size:12px; color:var(--dim); font-weight:600; letter-spacing:.06em; text-transform:uppercase; }
+  .big { font: 700 44px/1 var(--mono); }
+  .sub { color:var(--dim); font-size:12px; margin-top:6px; font-family:var(--mono); }
+  .ttl { text-align:center; }
+  .ring { position:relative; width:180px; height:180px; margin:6px auto 0; }
+  .ring svg { transform:rotate(-90deg); }
+  .ring .num { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .ring .num .big { font-size:40px; }
+  .bar { height:10px; background:#232836; border-radius:5px; overflow:hidden; margin-top:10px; }
+  .bar i { display:block; height:100%; background:var(--acc); }
+  .whatif { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+  .whatif > div { background:#232836; border-radius:6px; padding:6px 8px; text-align:center; }
+  .whatif .wl { font-size:11px; color:var(--dim); } .whatif .wv { font: 600 15px var(--mono); margin-top:2px; } .whatif .wd { font: 11px var(--mono); }
+  .stack { display:flex; height:22px; border-radius:6px; overflow:hidden; background:#232836; }
+  .stack i { display:block; height:100%; min-width:1px; }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px; font-size:12px; color:var(--dim); }
+  .legend .li b { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+  .legend .li em { font: 11px var(--mono); color:var(--fg); font-style:normal; margin-left:4px; }
+  table.tools td:nth-child(3) { width:40%; } .tb { height:8px; background:#232836; border-radius:4px; overflow:hidden; } .tb i { display:block; height:100%; background:#ff9f43; }
+  .advice { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
+  .advice b { color:var(--ok); font-family:var(--mono); } .advice.dim { color:var(--dim); font-size:12px; }
+  .advice button, .mh button { background:#2a3140; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
+  .advice button:hover, .mh button:hover { background:#354055; }
+  .whatif.sw > div { cursor:pointer; } .whatif.sw > div:hover { background:#2a3140; }
+  .modal tr.best td { background:#1f2d24; } .modal tr.best td:first-child::after { content:' ✓'; color:var(--ok); }
+  .modal[hidden] { display:none; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:10; }
+  .modal .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(640px, 92vw); padding:18px 22px; max-height:85vh; overflow:auto; }
+  .modal .mh { display:flex; justify-content:space-between; align-items:center; font-weight:600; margin-bottom:8px; }
+  .modal h3 { font-size:13px; margin:14px 0 6px; color:var(--acc); } .modal h3 em { font: 12px var(--mono); color:var(--dim); font-style:normal; margin-left:8px; }
+  .modal ul { margin:0; padding-left:18px; } .modal li { margin:4px 0; } .modal li b { font-family:var(--mono); }
+  table.habits td:first-child { white-space:normal; } table.habits tr.dim { color:var(--dim); } table.habits .z { color:#4a5160; } table.habits b { color:var(--bad); }
+  .card.strip .chips { gap:6px; } .card.strip .chip { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .chip { background:#232836; border-radius:6px; padding:5px 9px; font: 12px var(--mono); }
+  .chip b { color:var(--dim); font-weight:500; margin-right:6px; }
+  canvas { width:100%; height:260px; display:block; }
+  table { width:100%; border-collapse:collapse; font: 12px var(--mono); }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--dim); font-weight:500; }
+  .c-model_switch { color:#ff9f43; } .c-effort_change { color:#ff5c5c; } .c-compact { color:#6ea8fe; } .c-ttl_expiry { color:#ffc857; } .c-unexplained { color:#b58cff; }
+  .empty { color:var(--dim); padding:40px; text-align:center; }
+  .warnbox { border-left:3px solid var(--bad); background:#2a1a1a; padding:10px 12px; border-radius:6px; font-size:13px; }
+  .okbox { border-left:3px solid var(--ok); background:#172a1f; padding:10px 12px; border-radius:6px; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1>Sessions</h1>
+    <div class="root" id="root"></div>
+    <div id="list"></div>
+    <div id="habits" class="side-habits"></div>
+  </aside>
+  <main id="main"><div class="empty">세션 선택 대기 중…</div></main>
+</div>
+<div id="modal" class="modal" hidden onclick="if(event.target===this)closeAdvice()"></div>
+<script>
+const $ = s => document.querySelector(s);
+const fmtTok = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(0)+'k' : String(Math.round(n||0));
+const usd = n => '$' + (n||0).toFixed(2);
+const short = m => (m||'').replace('claude-','').replace('-4-5-20251001','');
+const ago = ms => { if (ms < 60e3) return Math.floor(ms/1000)+'s'; if (ms < 3600e3) return Math.floor(ms/60e3)+'m'; if (ms < 86400e3) return (ms/3600e3).toFixed(1)+'h'; return (ms/86400e3).toFixed(1)+'d'; };
+const PRICE = { 'claude-fable-5-1':{in:10,out:50,read:0.025}, 'claude-fable-5':{in:10,out:50,read:0.1}, 'claude-opus-5':{in:5,out:25,read:0.1}, 'claude-sonnet-5':{in:2,out:10,read:0.1}, 'claude-haiku-4-5-20251001':{in:1,out:5,read:0.1} };
+const WHATIF = [['claude-fable-5','fable이었다면'], ['claude-opus-5','opus였다면'], ['claude-sonnet-5','sonnet이었다면'], ['claude-haiku-4-5-20251001','haiku였다면']];
+const family = m => (m||'').startsWith('claude-fable') ? 'claude-fable-5' : m;
+function costAs(tok, model) { const p = PRICE[model]; return (tok.in*p.in + tok.cw1h*p.in*2 + (tok.cw5m+tok.cwOther)*p.in*1.25 + tok.cr*p.in*p.read + tok.out*p.out) / 1e6; }
+function whatIf(s) {
+  if (!s.tok) return '';
+  const main = family(s.mainModel);
+  return `<div class="whatif">` + WHATIF.filter(([m]) => m !== main).map(([m, label]) => { const v = costAs(s.tok, m); const d = v - s.cost; return `<div><div class="wl">${label}</div><div class="wv">${usd(v)}</div><div class="wd" style="color:${d>0?'var(--bad)':'var(--ok)'}">${d>0?'+':''}${usd(d)}</div></div>`; }).join('') + `</div>`;
+}
+
+let state = null, selected = null, detailCache = {}, clockSkew = 0;
+
+const es = new EventSource('/events');
+es.onmessage = e => { state = JSON.parse(e.data); clockSkew = state.now - Date.now(); if (!selected && state.sessions.length) selected = state.sessions[0].id; renderList(); loadDetail(selected, true); };
+
+function status(s) { const now = Date.now()+clockSkew; if (s.busy || s.subActive) return 'busy'; if (now - s.lastCallEnd < s.ttlMin*60e3) return 'live'; return 'dead'; }
+
+function renderList() {
+  $('#root').textContent = state.root;
+  $('#list').innerHTML = state.sessions.map(s => `
+    <div class="sess ${s.id===selected?'sel':''}" data-id="${s.id}">
+      <div class="t"><span class="dot ${status(s)}"></span>${esc(s.title)}</div>
+      <div class="m"><span>${short(s.model)}</span><span>${fmtTok(s.ctx)}</span><span>${usd(s.cost)}</span><span class="ago" data-ts="${s.lastTs}">${ago(Date.now()+clockSkew-s.lastTs)}</span></div>
+    </div>`).join('');
+  document.querySelectorAll('.sess').forEach(el => el.onclick = () => { selected = el.dataset.id; renderList(); loadDetail(selected, true); });
+  const sel = state.sessions.find(x => x.id === selected);
+  $('#habits').innerHTML = sel ? `<h1>캐시를 깨는 나쁜 습관</h1>${habitsCard(sel)}` : '';
+}
+function scoreCard(s) {
+  const a = s.advice || {}; const ttl = (s.byCause && s.byCause.ttl_expiry && s.byCause.ttl_expiry.n) || 0;
+  const compactCost = (s.byCause && s.byCause.compact && s.byCause.compact.extra) || 0;
+  const avoidable = Math.max(0, s.breakCost - compactCost);
+  const breakShare = s.cost ? avoidable / s.cost : 0;
+  const readPerOut = s.out ? s.cacheRead / s.out : 0;
+  const parts = [
+    { label: '캐시 규율', max: 40, v: 40 * Math.max(0, 1 - breakShare / 0.2), note: `깨짐 손실 ${Math.round(breakShare * 100)}% of cost` },
+    { label: '컨텍스트 청결', max: 30, v: 30 * (1 - Math.min(1, a.deadPct || 0)), note: `폐기물 ${Math.round((a.deadPct || 0) * 100)}%` },
+    { label: '읽기 절제', max: 15, v: 15 * Math.max(0, Math.min(1, 1 - (readPerOut - 100) / 900)), note: `출력 1토큰당 ${Math.round(readPerOut)} 읽음` },
+    { label: '시간 규율', max: 15, v: Math.max(0, 15 - 5 * ttl), note: `TTL 만료 ${ttl}건` },
+  ];
+  const total = Math.round(parts.reduce((n, p) => n + p.v, 0));
+  const grade = total >= 90 ? 'S' : total >= 75 ? 'A' : total >= 60 ? 'B' : total >= 45 ? 'C' : 'D';
+  const gcol = { S: 'var(--ok)', A: 'var(--ok)', B: 'var(--acc)', C: 'var(--warn)', D: 'var(--bad)' }[grade];
+  const perPrompt = s.prompts ? Math.round(s.out / s.prompts) : 0; const callsPerPrompt = s.prompts ? (s.calls / s.prompts).toFixed(1) : '-';
+  return `<div class="score"><div class="grade" style="color:${gcol}">${grade}</div><div><div class="pts">${total} / 100</div><div class="sub">${verdict(grade, parts)}</div></div></div>` +
+    parts.map(p => `<div class="srow"><span>${p.label}</span><div class="bar"><i style="width:${100 * p.v / p.max}%;background:${p.v / p.max > .7 ? 'var(--ok)' : p.v / p.max > .4 ? 'var(--warn)' : 'var(--bad)'}"></i></div><em>${Math.round(p.v)}/${p.max}</em></div><div class="sub" style="margin:-2px 0 0 100px;font-size:11px">${p.note}</div>`).join('') +
+    `<div class="fun"><span>말 한마디당 <b>${fmtTok(perPrompt)}</b> 출력</span><span>프롬프트당 <b>${callsPerPrompt}</b>호출</span><span>thinking <b>${s.out ? Math.round(100 * s.think / s.out) : 0}%</b></span><span>질문 <b>${s.asks}</b>번</span></div>`;
+}
+// ---- character card: state image + line (states defined in character-spec.md)
+const LINES = { broke: '아야… 다시 다 읽었어요', asking: '형, 어떻게 할까요?', working: '작업 중…', full: '배가 불러요…', sleepy: '졸려요… 곧 잊어버릴 것 같아요', asleep: '자고 있어요. 깨워도 돼요', amnesia: '깨우면 다 까먹은 상태예요', idle: '대기 중' };
+const WHY = s => ({ broke: '3분 내 피할 수 있던 캐시 깨짐', asking: '질문 띄우고 답 기다리는 중', working: '도구 호출 중', full: `컨텍스트 ${fmtTok(s.ctx)}`, sleepy: 'TTL 12분 미만', asleep: `만료 · ${fmtTok(s.ctx)} < 임계 ${fmtTok(s.continueThreshold)}`, amnesia: `만료 · ${fmtTok(s.ctx)} ≥ 임계 ${fmtTok(s.continueThreshold)}`, idle: '' })[s.charState] || '';
+function charCard(s) {
+  const st = s.charState || 'idle';
+  return `<div class="char"><div class="bubble" title="${st} · ${WHY(s)}">${LINES[st] || ''}</div><img src="/img/${st}.png" alt="${st}"></div>`;
+}
+// ---- RPG character sheet: XP accrues across the whole folder; the session shows what it added
+const xpOf = s => Math.max(0, Math.round(10 * (s.saved || 0) + 25 * (s.commits || 0) + (s.prompts || 0)));
+const levelOf = xp => Math.floor(Math.sqrt(xp / 100)) + 1;
+const xpForLevel = l => 100 * (l - 1) * (l - 1);
+function heroCard(s) {
+  const all = state.sessions; const sum = k => all.reduce((n, x) => n + (x[k] || 0), 0);
+  const xp = all.reduce((n, x) => n + xpOf(x), 0); const lv = levelOf(xp); const lo = xpForLevel(lv), hi = xpForLevel(lv + 1); const pct = Math.round(100 * (xp - lo) / (hi - lo));
+  const hit = (sum('cacheRead')) / Math.max(1, sum('cacheRead') + sum('cacheWrite')); const totalCalls = sum('calls'), subCalls = sum('subCalls');
+  const avoidable = all.reduce((n, x) => n + Math.max(0, (x.breakCost || 0) - ((x.byCause && x.byCause.compact && x.byCause.compact.extra) || 0)), 0);
+  const badges = [
+    ['캐시 마스터', hit >= 0.97, `적중률 ${Math.round(hit * 100)}%`],
+    ['무사고 100', all.some(x => x.bestStreak >= 100), `최고 연속 ${Math.max(0, ...all.map(x => x.bestStreak || 0))}호출`],
+    ['정시 퇴근', sum('lateCalls') === 0, `19시 이후 호출 ${sum('lateCalls')}`],
+    ['커밋 머신', sum('commits') >= 100, `커밋 ${sum('commits')}`],
+    ['압축 장인', sum('compacts') >= 5, `압축 ${sum('compacts')}회`],
+    ['위임왕', subCalls >= 0.1 * totalCalls, `서브에이전트 ${Math.round(100 * subCalls / Math.max(1, totalCalls))}%`],
+    ['결단력', sum('asks') >= 50, `결정 ${sum('asks')}건`],
+    ['야행성', sum('nightCalls') > 0, `새벽 호출 ${sum('nightCalls')}`],
+  ];
+  const stats = [
+    ['절약', `${usd(sum('saved'))}`, '캐시로 아낀 정가'],
+    ['출혈', `${usd(avoidable)}`, '피할 수 있던 깨짐'],
+    ['연속', `${s.streak}/${s.bestStreak}`, '이 세션 무사고 호출 (현재/최고)'],
+    ['획득', `+${xpOf(s).toLocaleString()} XP`, '이 세션이 보탠 경험치'],
+  ];
+  return `<div class="hero"><div class="lv"><small>Lv.</small>${lv}</div><div style="flex:1"><div class="sub">XP ${xp.toLocaleString()} · 다음 레벨까지 ${(hi - xp).toLocaleString()}</div><div class="bar"><i style="width:${pct}%;background:var(--ok)"></i></div></div></div>` +
+    `<div class="stats">${stats.map(([k, v, t]) => `<div title="${t}"><span>${k}</span><b>${v}</b></div>`).join('')}</div>` +
+    `<div class="badges">${badges.map(([name, on, why]) => `<span class="badge ${on ? 'on' : ''}" title="${why}">${on ? '★' : '☆'} ${name}</span>`).join('')}</div>`;
+}
+function verdict(grade, parts) {
+  const worst = parts.slice().sort((a, b) => a.v / a.max - b.v / b.max)[0];
+  if (grade === 'S') return '흠잡을 데 없음';
+  return `제일 깎인 건 ${worst.label} (${worst.note})`;
+}
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+async function loadDetail(id, force) {
+  if (!id) return; if (force || !detailCache[id]) { const r = await fetch('/api/detail?id='+encodeURIComponent(id)); detailCache[id] = await r.json(); }
+  renderMain();
+}
+
+function renderMain() {
+  const s = state.sessions.find(x => x.id === selected); if (!s) return;
+  const d = detailCache[s.id] || { series: [], breaks: [] };
+  const ttlMs = s.ttlMin*60e3;
+  $('#main').innerHTML = `
+    <div class="top">
+      <div class="card ttl"><h2>Cache TTL (${s.ttlMin}m)</h2>
+        <div class="ring"><svg width="180" height="180" viewBox="0 0 180 180"><circle cx="90" cy="90" r="80" fill="none" stroke="#232836" stroke-width="12"/><circle id="arc" cx="90" cy="90" r="80" fill="none" stroke="var(--ok)" stroke-width="12" stroke-linecap="round" stroke-dasharray="502.6" stroke-dashoffset="0"/></svg>
+        <div class="num"><div class="big" id="ttl">--:--</div><div class="sub" id="ttlsub"></div></div></div>
+        <div id="ttlwarn" style="margin-top:12px"></div>
+      </div>
+      <div class="card"><h2>Context</h2><div class="big">${fmtTok(s.ctx)}</div>
+        <div class="bar"><i style="width:${Math.min(100, s.ctx/1e6*100)}%"></i></div>
+        <div class="sub">of 1M window · cacheR ${fmtTok(s.cacheRead)} · cacheW ${fmtTok(s.cacheWrite)} · compacts ${s.compacts}</div>
+        ${adviceLine(s)}
+        ${switchCells(s)}
+        ${(s.ctx > s.continueThreshold && (Date.now() + clockSkew) < s.lastCallStart + s.ttlMin * 60e3) ? `<div class="sub" style="margin-top:10px;color:var(--warn)">캐시 만료 후 이 세션을 꼭 이어가야 한다면 compact를 미리 해주세요</div>` : ''}
+      </div>
+      <div class="card"><h2>Cost (API 환산)</h2><div class="big">${usd(s.cost)}</div>
+        <div class="sub">out ${fmtTok(s.out)} · think ${s.out?Math.round(100*s.think/s.out):0}% · calls ${s.calls}${s.subCalls?' +'+s.subCalls+' sub':''}</div>
+        <div class="sub" style="margin-top:10px">캐시 깨짐 손실 <b style="color:var(--bad)">${usd(s.breakCost)}</b> (${d.breaks.length}건)</div>
+        ${whatIf(s)}
+      </div>
+      <div class="card">${charCard(s)}</div>
+    </div>
+    <div class="card"><h2>Context over time (톱니 = 캐시 재작성, 절벽 = 압축)</h2><canvas id="chart"></canvas><div class="legend" id="legend"></div></div>
+    <div class="card"><h2>Context composition (추정 · 문자수 비율을 실제 컨텍스트에 맞춰 보정)</h2>${compBar(s)}</div>
+    <div class="card"><h2>Cache breaks (최근)</h2>${breakTable(d.breaks)}</div>
+    <div class="card strip"><h2>State</h2>
+      <div class="chips">
+        <span class="chip"><b>model</b>${short(s.model)}</span><span class="chip"><b>effort</b>${s.effort||'-'}</span><span class="chip"><b>skill</b>${s.skill||'-'}</span>
+        <span class="chip"><b>last tool</b>${s.lastTool||'-'}</span><span class="chip"><b>stop</b>${s.lastStop||'-'}</span><span class="chip"><b>prompts</b>${s.prompts}</span>
+        <span class="chip"><b>asks</b>${s.asks}</span><span class="chip"><b>entry</b>${s.entry||'-'}</span><span class="chip"><b>cwd</b>${esc(s.cwd||'')}</span>
+        <span class="chip"><b>span</b>${new Date(s.firstTs).toLocaleString()} → ${new Date(s.lastTs).toLocaleString()}</span>
+      </div>
+    </div>`;
+  drawChart(d.series, d.breaks);
+  tick();
+}
+
+const COMP = [
+  ['sys', '시스템+툴정의+CLAUDE.md', '#5b6270'], ['user', '내 프롬프트', '#3ddc84'], ['assistant', '어시스턴트 텍스트', '#6ea8fe'],
+  ['toolInput', '툴 호출 입력', '#9ad0ff'], ['toolResult', '툴 결과', '#ff9f43'], ['reminders', '시스템 리마인더/훅', '#b58cff'],
+  ['summary', '압축 요약', '#ffc857'], ['images', '이미지', '#ff5c5c'],
+];
+function compBar(s) {
+  const c = s.comp; if (!c) return '<div class="sub">데이터 없음</div>';
+  const total = COMP.reduce((n, [k]) => n + (c[k] || 0), 0) || 1;
+  const segs = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<i style="width:${100*c[k]/total}%;background:${col}" title="${label} ${fmtTok(c[k])}"></i>`).join('');
+  const items = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<span class="li"><b style="background:${col}"></b>${label} <em>${fmtTok(c[k])} · ${Math.round(100*c[k]/total)}%</em></span>`).join('');
+  return `<div class="stack">${segs}</div><div class="legend">${items}</div>`;
+}
+const HABITS = [
+  ['60분 넘기기', ['ttl_expiry']],
+  ['모델 바꾸기', ['model_switch']],
+  ['effort 바꾸기', ['effort_change']],
+  ['툴 목록 바꾸기', ['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'invoked_skills', 'nested_memory']],
+  ['원인 미상', ['unexplained', 'date_change', 'auto_mode', 'auto_mode_exit']],
+];
+function sumCauses(byCause, causes) { const r = { n: 0, extra: 0, rewrite: 0 }; for (const c of causes) { const v = byCause && byCause[c]; if (v) { r.n += v.n; r.extra += v.extra; r.rewrite += v.rewrite; } } return r; }
+function habitsCard(s) {
+  const all = {}; for (const x of state.sessions) for (const [c, v] of Object.entries(x.byCause || {})) { const a = all[c] = all[c] || { n: 0, extra: 0, rewrite: 0 }; a.n += v.n; a.extra += v.extra; a.rewrite += v.rewrite; }
+  const rows = HABITS.map(([label, causes], i) => ({ i, label, mine: sumCauses(s.byCause, causes), folder: sumCauses(all, causes) })).sort((a, b) => b.mine.extra - a.mine.extra || b.folder.extra - a.folder.extra);
+  const compact = sumCauses(s.byCause, ['compact']);
+  return `<table class="habits"><tr><th></th><th>이 세션</th><th>폴더 전체</th></tr>` + rows.map((r, k) => `<tr class="${r.mine.n ? '' : 'dim'}"><td>${k + 1}. ${r.label}</td><td>${r.mine.n ? r.mine.n + '건 · <b>' + usd(r.mine.extra) + '</b>' : '<span class="z">0</span>'}</td><td>${r.folder.n ? r.folder.n + '건 · ' + usd(r.folder.extra) : '<span class="z">0</span>'}</td></tr>`).join('') + `</table>` +
+    `<div class="sub" style="margin-top:8px">압축(의도적) ${compact.n}건 ${usd(compact.extra)}은 제외 · 비용 = 다시 쓴 토큰 × (쓰기 − 읽기 단가)</div>`;
+}
+function adviceLine(s) {
+  const a = s.advice; if (!a) return '';
+  if (a.recommend) return `<div class="advice"><span>압축으로 <b>${usd(a.saving)}</b> 아끼세요</span><button onclick="openAdvice()">상세</button></div>`;
+  return `<div class="advice dim"><span>압축 이득 작음 (${fmtTok(a.dead)} 폐기물 · 손익분기 ${a.breakEven === null ? '∞' : a.breakEven + '호출'})</span><button onclick="openAdvice()">상세</button></div>`;
+}
+function openAdvice() {
+  const s = state.sessions.find(x => x.id === selected); const a = s && s.advice; if (!a) return;
+  const pct = n => Math.round(100 * n / (s.ctx || 1)) + '%';
+  $('#modal').innerHTML = `<div class="box">
+    <div class="mh"><span>압축 근거 · ${esc(s.title)}</span><button onclick="closeAdvice()">✕</button></div>
+    <h3>죽은 무게 <em>${fmtTok(a.dead)} · ${pct(a.dead)} of ${fmtTok(s.ctx)}</em></h3>
+    <ul>
+      <li>같은 파일 재Read로 밀려난 옛 사본 <b>${fmtTok(a.dupRead)}</b> (${a.dupN}건)</li>
+      <li>Read 후 Edit/Write된 파일의 옛 내용 <b>${fmtTok(a.staleRead)}</b> (${a.staleN}건)</li>
+      <li>${40}호출 이상 지난 툴 결과 <b>${fmtTok(a.oldResults)}</b> (${a.oldN}건)</li>
+    </ul>
+    <h3>비용 흐름 <em>${short(s.model)} 기준</em></h3>
+    <ul>
+      <li>지금 호출당 캐시 읽기 <b>${usd(a.perCallNow)}</b> → 압축 후 <b>${usd(a.perCallAfter)}</b> (예상 ${fmtTok(a.postCtx)})</li>
+      <li>이 세션 턴당 평균 호출 <b>${a.callsPerTurn.toFixed(1)}</b>회 → 턴당 <b>${usd(a.perCallNow * a.callsPerTurn)}</b></li>
+      <li>압축 비용 추정 <b>${usd(a.compactionCost)}</b> (요약 출력 + 새 컨텍스트 쓰기 + 파일 다시 읽기 80k)</li>
+      <li>손익분기 <b>${a.breakEven === null ? '∞' : a.breakEven + '호출'}</b> · 앞으로 ${a.horizon}호출 기준 순절감 <b style="color:${a.saving > 0 ? 'var(--ok)' : 'var(--bad)'}">${usd(a.saving)}</b></li>
+    </ul>
+    <div class="sub">추천 조건: 컨텍스트 100k 초과이고 순절감이 압축 비용보다 크면서, 폐기물 25% 이상 또는 손익분기 15호출 이하. 압축은 캐시가 살아있을 때 해야 함(만료 후 압축은 그 호출이 전체를 다시 씀).</div>
+    ${calNote()}
+  </div>`;
+  $('#modal').hidden = false;
+}
+function closeAdvice() { $('#modal').hidden = true; }
+function calNote() {
+  const c = state.calibration; if (!c) return '';
+  const item = (label, v, n) => `${label} ${fmtTok(v)} <span style="color:${n ? 'var(--ok)' : 'var(--warn)'}">(${n ? '이 폴더 실측 n=' + n : '기본값, 샘플 없음'})</span>`;
+  return `<div class="sub" style="margin-top:8px">보정 상수: ${item('시스템 바닥', c.sys, c.n.sys)} · ${item('압축 후 요약', c.summary, c.n.summary)} · ${item('다시 읽기', c.regrowth, c.n.regrowth)}</div>`;
+}
+function switchCells(s) {
+  const w = s.switch; if (!w || !w.models.length) return '';
+  return `<div class="whatif sw" style="grid-template-columns:repeat(${w.models.length},1fr)">` + w.models.map((m, i) => `<div onclick="openSwitch(${i})" title="클릭: 올리는 방법 사다리"><div class="wl">${m.label}로 올리면</div><div class="wv" style="color:var(--ok)">${usd(m.bestCost)}</div><div class="wd">${m.best} · 이어가면 ${usd(m.inSession)}</div></div>`).join('') + `</div><div class="sub" style="margin-top:6px">갑갑할 때: 가는 비용 + 돌아오는 비용 합계 · effort 올리기는 ${usd(w.models[0].effortCost)}</div>`;
+}
+function openSwitch(i) {
+  const s = state.sessions.find(x => x.id === selected); const w = s && s.switch; if (!w) return; const m = w.models[i];
+  const rows = m.options.map((o, k) => `<tr class="${o.name === m.best ? 'best' : ''}"><td>${k + 1}. ${o.name}</td><td>${usd(o.go)}</td><td>${o.back ? usd(o.back) : '<span style="color:var(--ok)">0</span>'}</td><td><b>${usd(o.total)}</b></td><td>${o.keep ? '유지' : '요약/포기'}</td><td class="sub">${o.note}</td></tr>`).join('');
+  $('#modal').innerHTML = `<div class="box">
+    <div class="mh"><span>갑갑할 때: ${short(s.model)} → ${m.label} · ${esc(s.title)}</span><button onclick="closeAdvice()">✕</button></div>
+    <h3>행동지침 <em>지금 컨텍스트 ${fmtTok(s.ctx)} 기준</em></h3>
+    <ol>
+      <li>먼저 <b>effort</b>를 올려봐 (${usd(m.effortCost)}, 모델 전환의 몇 분의 일).</li>
+      <li>그래도 답답하면 <b>옆 세션</b>을 열어 상위 모델에게 문제만 물어봐. 이 세션은 TTL ${w.ttlMin}분 안에 돌아오면 캐시가 그대로라 <b>돌아오는 비용 0</b>.</li>
+      <li>상위 모델로 아예 넘어갈 거면 <b>압축 후 전환</b>. 이어가기는 전체를 두 번(갈 때, 돌아올 때) 다시 쓰니 마지막 수단.</li>
+    </ol>
+    <h3>비용 사다리 <em>가는 비용 + 돌아오는 비용</em></h3>
+    <table><tr><th>방식</th><th>갈 때</th><th>돌아올 때</th><th>합계</th><th>맥락</th><th></th></tr>${rows}</table>
+    <div class="sub" style="margin-top:8px">돌아올 때 = ${m.label} 작업 후 다시 ${short(s.model)}로 오며 그 컨텍스트를 ${short(s.model)} 캐시에 쓰는 비용. 8월 데이터에서 fable→sonnet 복귀 22번이 이 항목이었음.</div>
+    ${calNote()}
+  </div>`;
+  $('#modal').hidden = false;
+}
+function breakTable(br) {
+  if (!br.length) return '<div class="sub">없음</div>';
+  return `<table><tr><th>when</th><th>cause</th><th>from→to</th><th>ctx</th><th>rewrite</th><th>extra $</th></tr>` +
+    br.slice().reverse().map(b => `<tr><td>${new Date(b.ts).toLocaleString()}</td><td class="c-${b.cause}">${b.cause}${b.sub?' (sub)':''}</td><td>${b.cause==='model_switch'?short(b.from)+'→'+short(b.model):b.cause==='effort_change'?b.effort:short(b.model)}</td><td>${fmtTok(b.ctx)}</td><td>${fmtTok(b.rewrite)}</td><td>${usd(b.extra)}</td></tr>`).join('') + '</table>';
+}
+
+function drawChart(series, breaks) {
+  const c = $('#chart'); if (!c || !series.length) return; const ctx = c.getContext('2d');
+  const dpr = window.devicePixelRatio || 1; const W = c.clientWidth || 1200, H = 260, L = 60, R = 10, T = 10, B = 24;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0,0,W,H);
+  const t0 = series[0].t, t1 = series[series.length-1].t || t0+1; const maxY = 1e6;
+  const X = t => L + (W-L-R) * (t - t0) / Math.max(1, t1 - t0), Y = v => T + (H-T-B) * (1 - v/maxY);
+  ctx.strokeStyle = '#262b36'; ctx.fillStyle = '#8b93a7'; ctx.font = '11px monospace';
+  for (let i = 0; i <= 4; i++) { const v = maxY*i/4, y = Y(v); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W-R, y); ctx.stroke(); ctx.fillText(fmtTok(v), 4, y+4); }
+  ctx.fillText(new Date(t0).toLocaleTimeString(), L, H-6); const lab = new Date(t1).toLocaleTimeString(); ctx.fillText(lab, W-R-ctx.measureText(lab).width, H-6);
+  const col = { 'claude-sonnet-5':'#6ea8fe', 'claude-opus-5':'#3ddc84', 'claude-fable-5':'#ff9f43', 'claude-fable-5-1':'#ff9f43', 'claude-haiku-4-5-20251001':'#b58cff' };
+  // stacked composition areas (sys, user, assistant, toolInput, toolResult, reminders, summary, images)
+  const hasComp = series.some(p => p.c);
+  if (hasComp) {
+    for (let k = 0; k < COMP.length; k++) {
+      ctx.fillStyle = COMP[k][2] + 'aa'; ctx.beginPath();
+      const base = p => (p.c || []).slice(0, k).reduce((n, v) => n + v, 0), top = p => base(p) + ((p.c || [])[k] || 0);
+      series.forEach((p, i) => { const x = X(p.t), y = Y(top(p)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      for (let i = series.length - 1; i >= 0; i--) ctx.lineTo(X(series[i].t), Y(base(series[i])));
+      ctx.closePath(); ctx.fill();
+    }
+    const lg = $('#legend'); if (lg) lg.innerHTML = COMP.map(([k, label, c]) => `<span class="li"><b style="background:${c}"></b>${label}</span>`).join('');
+  } else {
+    const y0 = Y(0);
+    for (let i = 1; i < series.length; i++) { const a = series[i-1], b = series[i]; ctx.fillStyle = (col[b.m] || '#ccc') + '22'; ctx.beginPath(); ctx.moveTo(X(a.t), y0); ctx.lineTo(X(a.t), Y(a.ctx)); ctx.lineTo(X(b.t), Y(b.ctx)); ctx.lineTo(X(b.t), y0); ctx.closePath(); ctx.fill(); }
+  }
+  ctx.lineWidth = 1.5;
+  for (let i = 1; i < series.length; i++) { const a = series[i-1], b = series[i]; ctx.strokeStyle = col[b.m] || '#ccc'; ctx.beginPath(); ctx.moveTo(X(a.t), Y(a.ctx)); ctx.lineTo(X(b.t), Y(b.ctx)); ctx.stroke(); }
+  // rewrite markers: cache write large relative to ctx
+  for (const p of series) if (p.cw > 20000 && p.cw > p.ctx*0.3) { ctx.fillStyle = 'rgba(255,92,92,.85)'; ctx.beginPath(); ctx.arc(X(p.t), Y(p.ctx), 3.5, 0, Math.PI*2); ctx.fill(); }
+  const bc = { model_switch:'#ff9f43', effort_change:'#ff5c5c', compact:'#6ea8fe', ttl_expiry:'#ffc857' };
+  for (const b of breaks) if (!b.sub) { ctx.strokeStyle = bc[b.cause] || '#b58cff'; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(X(b.ts), T); ctx.lineTo(X(b.ts), H-B); ctx.stroke(); ctx.setLineDash([]); }
+}
+
+function tick() {
+  if (!state) return; const s = state.sessions.find(x => x.id === selected); if (!s) return;
+  const now = Date.now()+clockSkew; const ttlMs = s.ttlMin*60e3; const left = s.lastCallStart + ttlMs - now;
+  const el = $('#ttl'), arc = $('#arc'), sub = $('#ttlsub'), warn = $('#ttlwarn'); if (!el) return;
+  if (left > 0) {
+    const mm = Math.floor(left/60e3), ss = Math.floor(left%60e3/1000); el.textContent = `${mm}:${String(ss).padStart(2,'0')}`;
+    const frac = left/ttlMs; arc.setAttribute('stroke-dashoffset', String(502.6*(1-frac))); arc.setAttribute('stroke', frac > .5 ? 'var(--ok)' : frac > .2 ? 'var(--warn)' : 'var(--bad)');
+    sub.textContent = '마지막 호출 ' + ago(now - s.lastCallStart) + ' 전';
+    warn.innerHTML = `<div class="sub" style="font-size:13px">깨뜨리면 <b style="color:var(--warn);font-family:var(--mono)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(현재 cost의 ${s.cost ? Math.round(100 * s.riskUsd / s.cost) : 0}%)</span></div>` + (frac < .2 ? `<div class="warnbox" style="margin-top:8px">곧 만료. 지금 치면 캐시 히트, 놓치면 ${usd(s.riskUsd)}</div>` : '');
+  } else {
+    el.textContent = '만료'; arc.setAttribute('stroke-dashoffset', '502.6'); arc.setAttribute('stroke', 'var(--bad)');
+    sub.textContent = ago(-left) + ' 전 만료';
+    const ok = s.ctx < s.continueThreshold;
+    warn.innerHTML = `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
+      <div class="sub" style="margin-top:6px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, 이 폴더 실측) · 지금 ${fmtTok(s.ctx)} · 이어가면 ${usd(s.riskUsd)} 재작성</div>`;
+  }
+  document.querySelectorAll('.ago').forEach(a => a.textContent = ago(now - +a.dataset.ts));
+}
+setInterval(tick, 1000);
+let rsz = null; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks); }, 100); });
+</script>
+</body>
+</html>
