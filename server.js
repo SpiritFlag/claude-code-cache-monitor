@@ -22,6 +22,7 @@ const PRICE = {
 };
 const price = (m) => PRICE[m] || { in: 5, out: 25, read: 0.1 };
 const PREFIX_EVENTS = new Set(['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'date_change', 'auto_mode', 'auto_mode_exit', 'nested_memory', 'invoked_skills']);
+const RESUME_RE = /continue from where you left off/i;
 
 // ---------------- state ----------------
 const files = new Map();     // file -> { offset, rest, sessionId, isSub, chainKey, seen:Set, prev, pending:[], lastUserTs }
@@ -68,6 +69,11 @@ function blockLen(b) {
   if (b.type === 'tool_result') return blockLen(b.content);
   if (b.type === 'image') return IMAGE_CHARS;
   return 0;
+}
+function markerText(c) {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.map(b => (b && b.type === 'text' ? (b.text || '') : '')).join(' ');
+  return '';
 }
 // ---- compaction advice: dead weight in context + cost flow
 const OLD_CALLS = 40;   // tool results older than this many calls count as stale
@@ -173,6 +179,9 @@ function handleRecord(f, d) {
       if (d.isCompactSummary) f.pending.push('compact');
       if (!f.isSub) f.lastUserTs = ts;
       const c = d.message && d.message.content;
+      if (d.isMeta && RESUME_RE.test(markerText(c))) {
+        if (!f.markerSeen.has(d.uuid)) { f.markerSeen.add(d.uuid); f.pending.push('resume'); }
+      }
       const human = !d.isMeta && !f.isSub && (typeof c === 'string' || (Array.isArray(c) && c.every(b => b.type === 'text' || b.type === 'image')));
       if (human) s.prompts++;
       if (!f.isSub && Array.isArray(c) && c.some(b => b.type === 'tool_result')) s.pendingAsk = false;
@@ -226,6 +235,7 @@ function handleRecord(f, d) {
           if (m.model !== prev.model) cause = 'model_switch';
           else if (events.includes('compact')) cause = 'compact';
           else if (gapMin > (s.ttlMin === 60 ? 60 : 5)) cause = 'ttl_expiry';
+          else if (events.includes('resume')) cause = 'session_resume';
           else if (d.effort !== prev.effort) cause = 'effort_change';
           else { const p = events.find(e => e.startsWith('prefix:')); cause = p ? p.slice(7) : 'unexplained'; }
           const p = price(m.model); const mult = t.cw1h > 0 ? 2 : 1.25;
@@ -264,9 +274,9 @@ function handleRecord(f, d) {
 
 function readFile(fp) {
   let f = files.get(fp);
-  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
+  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), markerSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
   let st; try { st = fs.statSync(fp); } catch { return; }
-  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.markerSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
   if (st.size === f.offset) return;
   const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
   fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
