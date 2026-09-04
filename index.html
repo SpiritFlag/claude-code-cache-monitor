@@ -138,8 +138,7 @@ function renderList() {
 }
 function scoreCard(s) {
   const a = s.advice || {}; const ttl = (s.byCause && s.byCause.ttl_expiry && s.byCause.ttl_expiry.n) || 0;
-  const compactCost = (s.byCause && s.byCause.compact && s.byCause.compact.extra) || 0;
-  const avoidable = Math.max(0, s.breakCost - compactCost);
+  const avoidable = s.breakCost;
   const breakShare = s.cost ? avoidable / s.cost : 0;
   const readPerOut = s.out ? s.cacheRead / s.out : 0;
   const parts = [
@@ -171,7 +170,7 @@ function heroCard(s) {
   const all = state.sessions; const sum = k => all.reduce((n, x) => n + (x[k] || 0), 0);
   const xp = all.reduce((n, x) => n + xpOf(x), 0); const lv = levelOf(xp); const lo = xpForLevel(lv), hi = xpForLevel(lv + 1); const pct = Math.round(100 * (xp - lo) / (hi - lo));
   const hit = (sum('cacheRead')) / Math.max(1, sum('cacheRead') + sum('cacheWrite')); const totalCalls = sum('calls'), subCalls = sum('subCalls');
-  const avoidable = all.reduce((n, x) => n + Math.max(0, (x.breakCost || 0) - ((x.byCause && x.byCause.compact && x.byCause.compact.extra) || 0)), 0);
+  const avoidable = all.reduce((n, x) => n + (x.breakCost || 0), 0);
   const badges = [
     ['캐시 마스터', hit >= 0.97, `적중률 ${Math.round(hit * 100)}%`],
     ['무사고 100', all.some(x => x.bestStreak >= 100), `최고 연속 ${Math.max(0, ...all.map(x => x.bestStreak || 0))}호출`],
@@ -258,6 +257,7 @@ function compBar(s) {
 }
 const HABITS = [
   ['60분 넘기기', ['ttl_expiry']],
+  ['세션 재개', ['session_resume']],
   ['모델 바꾸기', ['model_switch']],
   ['effort 바꾸기', ['effort_change']],
   ['툴 목록 바꾸기', ['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'invoked_skills', 'nested_memory']],
@@ -267,9 +267,9 @@ function sumCauses(byCause, causes) { const r = { n: 0, extra: 0, rewrite: 0 }; 
 function habitsCard(s) {
   const all = {}; for (const x of state.sessions) for (const [c, v] of Object.entries(x.byCause || {})) { const a = all[c] = all[c] || { n: 0, extra: 0, rewrite: 0 }; a.n += v.n; a.extra += v.extra; a.rewrite += v.rewrite; }
   const rows = HABITS.map(([label, causes], i) => ({ i, label, mine: sumCauses(s.byCause, causes), folder: sumCauses(all, causes) })).sort((a, b) => b.mine.extra - a.mine.extra || b.folder.extra - a.folder.extra);
-  const compact = sumCauses(s.byCause, ['compact']);
+  const free = sumCauses(s.byCause, ['compact', 'breakpoint_shift']);
   return `<table class="habits"><tr><th></th><th>이 세션</th><th>폴더 전체</th></tr>` + rows.map((r, k) => `<tr class="${r.mine.n ? '' : 'dim'}"><td>${k + 1}. ${r.label}</td><td>${r.mine.n ? r.mine.n + '건 · <b>' + usd(r.mine.extra) + '</b>' : '<span class="z">0</span>'}</td><td>${r.folder.n ? r.folder.n + '건 · ' + usd(r.folder.extra) : '<span class="z">0</span>'}</td></tr>`).join('') + `</table>` +
-    `<div class="sub" style="margin-top:8px">압축(의도적) ${compact.n}건 ${usd(compact.extra)}은 제외 · 비용 = 다시 쓴 토큰 × (쓰기 − 읽기 단가)</div>`;
+    `<div class="sub" style="margin-top:8px">압축·브레이크포인트 이동(정상) ${free.n}건 ${usd(free.extra)}은 제외 · 비용 = 다시 쓴 토큰 × (쓰기 − 읽기 단가)</div>`;
 }
 function adviceLine(s) {
   const a = s.advice; if (!a) return '';

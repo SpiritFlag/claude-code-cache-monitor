@@ -23,6 +23,10 @@ const PRICE = {
 const price = (m) => PRICE[m] || { in: 5, out: 25, read: 0.1 };
 const PREFIX_EVENTS = new Set(['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'date_change', 'auto_mode', 'auto_mode_exit', 'nested_memory', 'invoked_skills']);
 const RESUME_RE = /continue from where you left off/i;
+// 잠정치: 근거는 plan F-8 5건과 백로그 128ae4a7 1건뿐이다. P0-4 진단 필드로 한 달 더 보고 조정한다(R-2).
+const BP_MAX_REWRITE = 20000;   // 이보다 크면 브레이크포인트 이동으로 보지 않는다
+const BP_SHRINK_SLACK = 3000;   // |rewrite - shrink| 허용 폭 (= 직전 호출의 cw)
+const FREE_CAUSES = new Set(['compact', 'breakpoint_shift']); // 손실로 세지 않는 원인
 
 // ---------------- state ----------------
 const files = new Map();     // file -> { offset, rest, sessionId, isSub, chainKey, seen:Set, prev, pending:[], lastUserTs }
@@ -236,13 +240,14 @@ function handleRecord(f, d) {
           else if (events.includes('compact')) cause = 'compact';
           else if (gapMin > (s.ttlMin === 60 ? 60 : 5)) cause = 'ttl_expiry';
           else if (events.includes('resume')) cause = 'session_resume';
+          else if (shrink > 0 && Math.abs(rewrite - shrink) <= BP_SHRINK_SLACK && rewrite < BP_MAX_REWRITE) cause = 'breakpoint_shift';
           else if (d.effort !== prev.effort) cause = 'effort_change';
           else { const p = events.find(e => e.startsWith('prefix:')); cause = p ? p.slice(7) : 'unexplained'; }
           const p = price(m.model); const mult = t.cw1h > 0 ? 2 : 1.25;
           const extra = rewrite * p.in * (mult - p.read) / 1e6;
-          s.breakCost += extra;
+          if (!FREE_CAUSES.has(cause)) s.breakCost += extra;
           const bc = s.byCause[cause] = s.byCause[cause] || { n: 0, rewrite: 0, extra: 0 }; bc.n++; bc.rewrite += rewrite; bc.extra += extra;
-          if (cause !== 'compact' && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
+          if (!FREE_CAUSES.has(cause) && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
           s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total,
             prevIn: prev.in, prevCr: prev.cr, prevTotal: prev.total, curIn: t.in, curCw: t.cw, curCr: t.cr,
             cw1h: t.cw1h, cw5m: t.cw5m, shrink, grew, gapMin, prefixIntact, events });
