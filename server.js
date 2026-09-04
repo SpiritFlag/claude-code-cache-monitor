@@ -215,9 +215,14 @@ function handleRecord(f, d) {
       const prev = f.prev; const events = f.pending; f.pending = [];
       if (prev) {
         // tokens that should have been cache hits, capped at what was actually written this call (compaction shrinks the context)
-        const rewrite = Math.min(Math.max(0, prev.total - t.cr), t.cw + t.in);
+        const prevCached = prev.total - prev.in;             // 직전 호출이 캐시에 남긴 프리픽스
+        const rewrite = Math.min(Math.max(0, prevCached - t.cr), t.cw + t.in);
         if (rewrite > 2000) {
-          const gapMin = (ts - prev.ts) / 60000; let cause;
+          const gapMin = (ts - prev.ts) / 60000;
+          const shrink = prev.cr - t.cr;                     // 캐시 읽기 감소분(음수 가능)
+          const grew = total - prev.total;                   // 컨텍스트 증감(음수 가능)
+          const prefixIntact = t.cr >= prev.cr;
+          let cause;
           if (m.model !== prev.model) cause = 'model_switch';
           else if (events.includes('compact')) cause = 'compact';
           else if (gapMin > (s.ttlMin === 60 ? 60 : 5)) cause = 'ttl_expiry';
@@ -228,11 +233,13 @@ function handleRecord(f, d) {
           s.breakCost += extra;
           const bc = s.byCause[cause] = s.byCause[cause] || { n: 0, rewrite: 0, extra: 0 }; bc.n++; bc.rewrite += rewrite; bc.extra += extra;
           if (cause !== 'compact' && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
-          s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total });
+          s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total,
+            prevIn: prev.in, prevCr: prev.cr, prevTotal: prev.total, curIn: t.in, curCw: t.cw, curCr: t.cr,
+            cw1h: t.cw1h, cw5m: t.cw5m, shrink, grew, gapMin, prefixIntact, events });
           if (s.breaks.length > 60) s.breaks.shift();
         }
       }
-      f.prev = { total, model: m.model, ts, effort: d.effort };
+      f.prev = { total, in: t.in, cr: t.cr, model: m.model, ts, effort: d.effort };
       if (!f.isSub) {
         if (brokeNow) s.streak = 0; else s.streak++; if (s.streak > s.bestStreak) s.bestStreak = s.streak;
         s.model = m.model; s.effort = d.effort || ''; s.skill = d.attributionSkill || ''; s.ctx = total; s.lastStop = m.stop_reason || '';
@@ -345,11 +352,30 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end();
 });
 
-console.log('[cc-monitor] scanning', ROOT);
-scan(ROOT); calibrate(); recomputeAdvice();
-console.log('[cc-monitor] sessions:', sessions.size, 'files:', files.size);
-console.log('[cc-monitor] calibration (folder medians): sys=' + CAL.sys + ' (n=' + CAL.n.sys + ') summary=' + CAL.summary + ' (n=' + CAL.n.summary + ') regrowth=' + CAL.regrowth + ' (n=' + CAL.n.regrowth + ')');
-try { fs.watch(ROOT, { recursive: true }, onChange); console.log('[cc-monitor] watching (recursive)'); }
-catch (e) { console.log('[cc-monitor] recursive watch unavailable, polling every 2s'); setInterval(onChange, 2000); }
-setInterval(() => { if (clients.size) broadcast(); }, 15000); // keep busy/idle flags fresh
-server.listen(PORT, () => console.log('[cc-monitor] http://localhost:' + PORT));
+function reset() {
+  files.clear(); sessions.clear(); version = 0;
+  CAL.sys = DEFAULTS.sys; CAL.summary = DEFAULTS.summary; CAL.regrowth = DEFAULTS.regrowth;
+  CAL.n = { sys: 0, summary: 0, regrowth: 0 };
+}
+// target: 디렉터리 · 파일 · 그 배열. 항상 reset부터 한다.
+function replay(target) {
+  reset();
+  for (const t of [].concat(target)) {
+    const st = fs.statSync(t);
+    if (st.isDirectory()) scan(t); else readFile(t);
+  }
+  calibrate(); recomputeAdvice();
+  return { snapshot: snapshot(), sessions, files };
+}
+
+if (require.main === module) {
+  console.log('[cc-monitor] scanning', ROOT);
+  scan(ROOT); calibrate(); recomputeAdvice();
+  console.log('[cc-monitor] sessions:', sessions.size, 'files:', files.size);
+  console.log('[cc-monitor] calibration (folder medians): sys=' + CAL.sys + ' (n=' + CAL.n.sys + ') summary=' + CAL.summary + ' (n=' + CAL.n.summary + ') regrowth=' + CAL.regrowth + ' (n=' + CAL.n.regrowth + ')');
+  try { fs.watch(ROOT, { recursive: true }, onChange); console.log('[cc-monitor] watching (recursive)'); }
+  catch (e) { console.log('[cc-monitor] recursive watch unavailable, polling every 2s'); setInterval(onChange, 2000); }
+  setInterval(() => { if (clients.size) broadcast(); }, 15000); // keep busy/idle flags fresh
+  server.listen(PORT, () => console.log('[cc-monitor] http://localhost:' + PORT));
+}
+module.exports = { reset, replay, snapshot, detail, sessions, files, price };
