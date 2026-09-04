@@ -22,6 +22,11 @@ const PRICE = {
 };
 const price = (m) => PRICE[m] || { in: 5, out: 25, read: 0.1 };
 const PREFIX_EVENTS = new Set(['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'date_change', 'auto_mode', 'auto_mode_exit', 'nested_memory', 'invoked_skills']);
+const RESUME_RE = /continue from where you left off/i;
+// 잠정치: 근거는 plan F-8 5건과 백로그 128ae4a7 1건뿐이다. P0-4 진단 필드로 한 달 더 보고 조정한다(R-2).
+const BP_MAX_REWRITE = 20000;   // 이보다 크면 브레이크포인트 이동으로 보지 않는다
+const BP_SHRINK_SLACK = 3000;   // |rewrite - shrink| 허용 폭 (= 직전 호출의 cw)
+const FREE_CAUSES = new Set(['compact', 'breakpoint_shift']); // 손실로 세지 않는 원인
 
 // ---------------- state ----------------
 const files = new Map();     // file -> { offset, rest, sessionId, isSub, chainKey, seen:Set, prev, pending:[], lastUserTs }
@@ -68,6 +73,11 @@ function blockLen(b) {
   if (b.type === 'tool_result') return blockLen(b.content);
   if (b.type === 'image') return IMAGE_CHARS;
   return 0;
+}
+function markerText(c) {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.map(b => (b && b.type === 'text' ? (b.text || '') : '')).join(' ');
+  return '';
 }
 // ---- compaction advice: dead weight in context + cost flow
 const OLD_CALLS = 40;   // tool results older than this many calls count as stale
@@ -173,6 +183,9 @@ function handleRecord(f, d) {
       if (d.isCompactSummary) f.pending.push('compact');
       if (!f.isSub) f.lastUserTs = ts;
       const c = d.message && d.message.content;
+      if (d.isMeta && RESUME_RE.test(markerText(c))) {
+        if (!f.markerSeen.has(d.uuid)) { f.markerSeen.add(d.uuid); f.pending.push('resume'); }
+      }
       const human = !d.isMeta && !f.isSub && (typeof c === 'string' || (Array.isArray(c) && c.every(b => b.type === 'text' || b.type === 'image')));
       if (human) s.prompts++;
       if (!f.isSub && Array.isArray(c) && c.some(b => b.type === 'tool_result')) s.pendingAsk = false;
@@ -215,24 +228,33 @@ function handleRecord(f, d) {
       const prev = f.prev; const events = f.pending; f.pending = [];
       if (prev) {
         // tokens that should have been cache hits, capped at what was actually written this call (compaction shrinks the context)
-        const rewrite = Math.min(Math.max(0, prev.total - t.cr), t.cw + t.in);
+        const prevCached = prev.total - prev.in;             // 직전 호출이 캐시에 남긴 프리픽스
+        const rewrite = Math.min(Math.max(0, prevCached - t.cr), t.cw + t.in);
         if (rewrite > 2000) {
-          const gapMin = (ts - prev.ts) / 60000; let cause;
+          const gapMin = (ts - prev.ts) / 60000;
+          const shrink = prev.cr - t.cr;                     // 캐시 읽기 감소분(음수 가능)
+          const grew = total - prev.total;                   // 컨텍스트 증감(음수 가능)
+          const prefixIntact = t.cr >= prev.cr;
+          let cause;
           if (m.model !== prev.model) cause = 'model_switch';
           else if (events.includes('compact')) cause = 'compact';
           else if (gapMin > (s.ttlMin === 60 ? 60 : 5)) cause = 'ttl_expiry';
+          else if (events.includes('resume')) cause = 'session_resume';
+          else if (shrink > 0 && Math.abs(rewrite - shrink) <= BP_SHRINK_SLACK && rewrite < BP_MAX_REWRITE) cause = 'breakpoint_shift';
           else if (d.effort !== prev.effort) cause = 'effort_change';
           else { const p = events.find(e => e.startsWith('prefix:')); cause = p ? p.slice(7) : 'unexplained'; }
           const p = price(m.model); const mult = t.cw1h > 0 ? 2 : 1.25;
           const extra = rewrite * p.in * (mult - p.read) / 1e6;
-          s.breakCost += extra;
+          if (!FREE_CAUSES.has(cause)) s.breakCost += extra;
           const bc = s.byCause[cause] = s.byCause[cause] || { n: 0, rewrite: 0, extra: 0 }; bc.n++; bc.rewrite += rewrite; bc.extra += extra;
-          if (cause !== 'compact' && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
-          s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total });
+          if (!FREE_CAUSES.has(cause) && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
+          s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total,
+            prevIn: prev.in, prevCr: prev.cr, prevTotal: prev.total, curIn: t.in, curCw: t.cw, curCr: t.cr,
+            cw1h: t.cw1h, cw5m: t.cw5m, shrink, grew, gapMin, prefixIntact, events });
           if (s.breaks.length > 60) s.breaks.shift();
         }
       }
-      f.prev = { total, model: m.model, ts, effort: d.effort };
+      f.prev = { total, in: t.in, cr: t.cr, model: m.model, ts, effort: d.effort };
       if (!f.isSub) {
         if (brokeNow) s.streak = 0; else s.streak++; if (s.streak > s.bestStreak) s.bestStreak = s.streak;
         s.model = m.model; s.effort = d.effort || ''; s.skill = d.attributionSkill || ''; s.ctx = total; s.lastStop = m.stop_reason || '';
@@ -257,9 +279,9 @@ function handleRecord(f, d) {
 
 function readFile(fp) {
   let f = files.get(fp);
-  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
+  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), markerSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
   let st; try { st = fs.statSync(fp); } catch { return; }
-  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.markerSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
   if (st.size === f.offset) return;
   const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
   fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
@@ -345,11 +367,30 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end();
 });
 
-console.log('[cc-monitor] scanning', ROOT);
-scan(ROOT); calibrate(); recomputeAdvice();
-console.log('[cc-monitor] sessions:', sessions.size, 'files:', files.size);
-console.log('[cc-monitor] calibration (folder medians): sys=' + CAL.sys + ' (n=' + CAL.n.sys + ') summary=' + CAL.summary + ' (n=' + CAL.n.summary + ') regrowth=' + CAL.regrowth + ' (n=' + CAL.n.regrowth + ')');
-try { fs.watch(ROOT, { recursive: true }, onChange); console.log('[cc-monitor] watching (recursive)'); }
-catch (e) { console.log('[cc-monitor] recursive watch unavailable, polling every 2s'); setInterval(onChange, 2000); }
-setInterval(() => { if (clients.size) broadcast(); }, 15000); // keep busy/idle flags fresh
-server.listen(PORT, () => console.log('[cc-monitor] http://localhost:' + PORT));
+function reset() {
+  files.clear(); sessions.clear(); version = 0;
+  CAL.sys = DEFAULTS.sys; CAL.summary = DEFAULTS.summary; CAL.regrowth = DEFAULTS.regrowth;
+  CAL.n = { sys: 0, summary: 0, regrowth: 0 };
+}
+// target: 디렉터리 · 파일 · 그 배열. 항상 reset부터 한다.
+function replay(target) {
+  reset();
+  for (const t of [].concat(target)) {
+    const st = fs.statSync(t);
+    if (st.isDirectory()) scan(t); else readFile(t);
+  }
+  calibrate(); recomputeAdvice();
+  return { snapshot: snapshot(), sessions, files };
+}
+
+if (require.main === module) {
+  console.log('[cc-monitor] scanning', ROOT);
+  scan(ROOT); calibrate(); recomputeAdvice();
+  console.log('[cc-monitor] sessions:', sessions.size, 'files:', files.size);
+  console.log('[cc-monitor] calibration (folder medians): sys=' + CAL.sys + ' (n=' + CAL.n.sys + ') summary=' + CAL.summary + ' (n=' + CAL.n.summary + ') regrowth=' + CAL.regrowth + ' (n=' + CAL.n.regrowth + ')');
+  try { fs.watch(ROOT, { recursive: true }, onChange); console.log('[cc-monitor] watching (recursive)'); }
+  catch (e) { console.log('[cc-monitor] recursive watch unavailable, polling every 2s'); setInterval(onChange, 2000); }
+  setInterval(() => { if (clients.size) broadcast(); }, 15000); // keep busy/idle flags fresh
+  server.listen(PORT, () => console.log('[cc-monitor] http://localhost:' + PORT));
+}
+module.exports = { reset, replay, snapshot, detail, sessions, files, price };
