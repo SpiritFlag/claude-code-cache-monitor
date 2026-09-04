@@ -16,10 +16,9 @@ Plan §5의 SC에 붙일 수 있는 수단. 여기 없는 수단을 SC에 쓰지
 
 - 통합 브랜치: `develop`. 릴리즈 브랜치: `main`. 다르면 여기 적는다.
 - 사이클 브랜치는 `{버전}-{사이클명}`, develop에서 분기.
-- 릴리즈 전진 방식(둘 중 하나를 지운다):
-  - `ff-only`: `git switch main && git merge --ff-only {버전} && git push`. main 직푸시가 허용될 때.
-  - `PR merge commit`: main이 GitHub 룰셋으로 보호돼 직푸시가 안 될 때. `gh pr create --base main --head develop` → status check 통과 → Merge commit 병합 → develop에 main 백머지. Squash · Rebase 병합 금지(태그 SHA가 main 밖에 남는다).
-- CI 확인 명령: `{예: gh run list --branch <브랜치> --limit 1, gh pr checks <PR>}`. 없으면 "사용자 확인"이라 쓴다. close가 게이트와 릴리즈 전진 전에 이걸 쓴다.
+- 릴리즈 전진 방식: `ff-only`. `git switch main && git merge --ff-only {버전} && git push`.
+  (2026-09-04 확인: `SpiritFlag/claude-code-cache-monitor`의 main은 룰셋·브랜치 보호가 없어 직푸시가 된다. 보호가 걸리면 이 줄을 `PR merge commit` 방식으로 바꾼다.)
+- CI 확인 명령: **사용자 확인**. `.github/workflows/`가 없어 자동 검사가 돌지 않는다. close는 게이트와 릴리즈 전진 전에 `node --test test/` 결과와 사용자 육안 확인 날짜가 do §3에 남아 있는지를 대신 본다.
 
 ## 종료 훅
 
@@ -35,4 +34,7 @@ close 6단계(docs 커밋 직전)에 이 프로젝트가 추가로 하는 일. �
 
 ## 예외
 
-{이 프로젝트가 표준 규칙에서 벗어나는 것. 없으면 "없음".}
+1. **의존성 없음.** `package.json`이 없다. 런타임·테스트 모두 Node 내장 모듈만 쓴다(`node:test` 포함). 라이브러리를 들이려면 그 자체를 하나의 사이클로 연다.
+2. **CI 없음.** 모든 게이트는 수동 실행이고, 실행 결과는 do §3에 날짜와 함께 남겨야 근거로 인정한다.
+3. **`test/`는 아직 없다.** 자동 테스트를 SC에 처음 쓰는 사이클이 `test/` 와 `test/fixtures/`를 함께 만든다.
+4. **트랜스크립트 픽스처는 개인정보다.** `~/.claude/projects/` 원본을 그대로 커밋하지 않는다. 경로·프롬프트 본문·토큰을 지우고 집계에 필요한 수치 필드만 남긴다.
