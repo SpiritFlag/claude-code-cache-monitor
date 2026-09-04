@@ -8,7 +8,7 @@ Plan §5의 SC에 붙일 수 있는 수단. 여기 없는 수단을 SC에 쓰지
 
 | 수단 | 방법 | 비고 |
 |---|---|---|
-| 자동 테스트 | `node --test test/` | 테스트 위치 `test/*.test.js`. Node 18 내장 `node:test`만 쓴다(의존성 없음 원칙). CI가 없으므로 사이클 브랜치에서 수동 실행하고 결과를 do §3에 남긴다. 트랜스크립트 픽스처는 `test/fixtures/*.jsonl`에 두되 개인 경로·프롬프트 본문은 지우고 넣는다 |
+| 자동 테스트 | `node --test` (인자 없이. 디렉터리 인자를 주면 Node 24가 그것을 모듈로 읽으려다 실패한다) | 테스트 위치 `test/*.test.js`. Node 18 내장 `node:test`만 쓴다(의존성 없음 원칙). CI가 없으므로 사이클 브랜치에서 수동 실행하고 결과를 do §3에 남긴다. 트랜스크립트 픽스처는 `test/fixtures/*.jsonl`에 두되 개인 경로·프롬프트 본문은 지우고 넣는다 |
 | 사용자 육안 | `node server.js`로 띄운 대시보드를 브라우저(`http://localhost:7777`)에서 본다. 카드 · 그래프 · Cache breaks 표 · 습관 순위 · 캐릭터 상태 | 사용자가 확인한 날짜를 do §3에 남긴다 |
 | 로그·수치 | 서버 기동 로그(`[cc-monitor] …`)와 `curl localhost:7777/api/state`, `curl "localhost:7777/api/detail?id=<sessionId>"`의 JSON 필드 값을 읽는다. 변경 전후 비교는 같은 폴더를 두 번 띄워 집계(`byCause` · `breaks`)를 대조한다 | |
 
@@ -18,7 +18,7 @@ Plan §5의 SC에 붙일 수 있는 수단. 여기 없는 수단을 SC에 쓰지
 - 사이클 브랜치는 `{버전}-{사이클명}`, develop에서 분기.
 - 릴리즈 전진 방식: `ff-only`. `git switch main && git merge --ff-only {버전} && git push`.
   (2026-09-04 확인: `SpiritFlag/claude-code-cache-monitor`의 main은 룰셋·브랜치 보호가 없어 직푸시가 된다. 보호가 걸리면 이 줄을 `PR merge commit` 방식으로 바꾼다.)
-- CI 확인 명령: **사용자 확인**. `.github/workflows/`가 없어 자동 검사가 돌지 않는다. close는 게이트와 릴리즈 전진 전에 `node --test test/` 결과와 사용자 육안 확인 날짜가 do §3에 남아 있는지를 대신 본다.
+- CI 확인 명령: **사용자 확인**. `.github/workflows/`가 없어 자동 검사가 돌지 않는다. close는 게이트와 릴리즈 전진 전에 `node --test` 결과와 사용자 육안 확인 날짜가 do §3에 남아 있는지를 대신 본다.
 
 ## 종료 훅
 
