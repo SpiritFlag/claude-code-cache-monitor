@@ -75,6 +75,7 @@
   .advice button, .mh button { background:#2a3140; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
   .advice button:hover, .mh button:hover { background:#354055; }
   .whatif.sw > div { cursor:pointer; } .whatif.sw > div:hover { background:#2a3140; }
+  .whatif > div.current { background:#1f2d24; border:1px solid var(--ok); } .whatif > div.current .wv { color:var(--ok); }
   .modal tr.best td { background:#1f2d24; } .modal tr.best td:first-child::after { content:' ✓'; color:var(--ok); }
   .modal[hidden] { display:none; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:10; }
@@ -122,14 +123,18 @@ const fmtTok = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFix
 const usd = n => '$' + (n||0).toFixed(2);
 const short = m => (m||'').replace('claude-','').replace('-4-5-20251001','');
 const ago = ms => { if (ms < 60e3) return Math.floor(ms/1000)+'s'; if (ms < 3600e3) return Math.floor(ms/60e3)+'m'; if (ms < 86400e3) return (ms/3600e3).toFixed(1)+'h'; return (ms/86400e3).toFixed(1)+'d'; };
-const PRICE = { 'claude-fable-5-1':{in:10,out:50,read:0.025}, 'claude-fable-5':{in:10,out:50,read:0.1}, 'claude-opus-5':{in:5,out:25,read:0.1}, 'claude-sonnet-5':{in:2,out:10,read:0.1}, 'claude-haiku-4-5-20251001':{in:1,out:5,read:0.1} };
-const WHATIF = [['claude-fable-5-1','fable이었다면'], ['claude-opus-5','opus였다면'], ['claude-sonnet-5','sonnet이었다면'], ['claude-haiku-4-5-20251001','haiku였다면']];
-const family = m => (m||'').startsWith('claude-fable') ? 'claude-fable-5' : m;
-function costAs(tok, model) { const p = PRICE[model]; return (tok.in*p.in + tok.cw1h*p.in*2 + (tok.cw5m+tok.cwOther)*p.in*1.25 + tok.cr*p.in*p.read + tok.out*p.out) / 1e6; }
-function whatIf(s) {
-  if (!s.tok) return '';
-  const cur = family(s.model); // exclude the model the rest of the UI shows, not the most-used one
-  return `<div class="whatif">` + WHATIF.filter(([m]) => family(m) !== cur).map(([m, label]) => { const v = costAs(s.tok, m); const d = v - s.cost; return `<div title="${m}"><div class="wl">${label}</div><div class="wv">${usd(v)}</div><div class="wd" style="color:${d>0?'var(--bad)':'var(--ok)'}">${d>0?'+':''}${usd(d)}</div></div>`; }).join('') + `</div>`;
+// D-13(질문 q1로 개정) · D-14. 모델 비교 4칸은 서버가 계산해 내려준다(modelCompare) — "현재"는
+// family()로 묶어 판정해 마지막 실사용 모델 계열을 따라간다. 단가가 다르면 배수가 1.00×가 아닐 수
+// 있는데 그대로 보여준다(재미로 보는 추정치라 정밀도를 안 따진다)
+function modelCard(s) {
+  const mc = s.modelCompare; if (!mc || !mc.rows.length) return '';
+  const rows = mc.rows.map(r => `<div class="${r.current ? 'current' : ''}" title="${r.model}">
+      <div class="wl">${r.label}${r.current ? ' · 현재' : ''}</div>
+      <div class="wv">${usd(r.cost)}</div>
+      <div class="wd">${r.ratio == null ? '-' : r.ratio.toFixed(2) + '×'}</div>
+    </div>`).join('');
+  const breakdown = mc.mixed ? `<div class="sub" style="margin-top:8px">혼용 세션 실비: ${mc.breakdown.map(b => `${short(b.model)} ${usd(b.cost)} (${b.calls}회)`).join(' · ')}</div>` : '';
+  return `<div class="whatif" style="grid-template-columns:repeat(${mc.rows.length},1fr)">${rows}</div>${breakdown}<div class="sub" style="margin-top:6px;color:var(--dim)">재미로 보는 추정치 · 실제 과금과 다를 수 있음</div>`;
 }
 
 let state = null, selected = null, detailCache = {}, clockSkew = 0;
@@ -239,7 +244,7 @@ function renderMain() {
       <div class="card"><h2>Cost (API 환산)</h2><div class="big">${usd(s.cost)}</div>
         <div class="sub">out ${fmtTok(s.out)} · think ${s.out?Math.round(100*s.think/s.out):0}% · calls ${s.calls}${s.subCalls?' +'+s.subCalls+' sub':''}</div>
         <div class="sub" style="margin-top:10px">캐시 깨짐 손실 <b style="color:var(--bad)">${usd(s.breakCost)}</b> (${d.breaks.length}건)</div>
-        ${whatIf(s)}
+        ${modelCard(s)}
       </div>
       <div class="card">${charCard(s)}</div>
     </div>
