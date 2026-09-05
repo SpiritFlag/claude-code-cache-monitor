@@ -33,7 +33,12 @@
   .badge.on { color:var(--warn); border-color:#5a4a1e; background:#2a2415; }
   .fun { display:flex; flex-wrap:wrap; gap:6px 12px; margin-top:10px; font: 11px var(--mono); color:var(--dim); }
   .fun b { color:var(--fg); font-weight:600; }
-  aside h1 { font-size:13px; letter-spacing:.08em; color:var(--dim); margin:0; padding:14px 16px 8px; text-transform:uppercase; }
+  aside h1 { font-size:13px; letter-spacing:.08em; color:var(--dim); margin:0; padding:14px 16px 8px; text-transform:uppercase; display:flex; align-items:center; justify-content:space-between; gap:6px; }
+  aside h1 button { background:none; border:0; color:var(--dim); cursor:pointer; font:16px/1 var(--mono); padding:2px 5px; border-radius:4px; }
+  aside h1 button:hover { background:#232836; color:var(--fg); }
+  .app.nav-collapsed { grid-template-columns: 44px 1fr; }
+  .app.nav-collapsed aside h1 { padding:14px 0 8px; justify-content:center; }
+  .app.nav-collapsed aside h1 span, .app.nav-collapsed aside .root, .app.nav-collapsed aside #list, .app.nav-collapsed aside #habits { display:none; }
   aside .root { font:11px var(--mono); color:var(--dim); padding:0 16px 10px; word-break:break-all; }
   .sess { padding:10px 16px; border-top:1px solid var(--line); cursor:pointer; }
   .sess:hover { background:#1b1f28; } .sess.sel { background:#1f2532; border-left:3px solid var(--acc); padding-left:13px; }
@@ -89,12 +94,20 @@
   .empty { color:var(--dim); padding:40px; text-align:center; }
   .warnbox { border-left:3px solid var(--bad); background:#2a1a1a; padding:10px 12px; border-radius:6px; font-size:13px; }
   .okbox { border-left:3px solid var(--ok); background:#172a1f; padding:10px 12px; border-radius:6px; font-size:13px; }
+  /* narrow layouts: 4-up top row folds so Cost and the character drop to a second line.
+     On that second line they swap: the character fits the 280px column, Cost needs the wide one for its 3-up whatif grid. */
+  @media (max-width: 1280px) {
+    .top { grid-template-columns: 280px 1fr; }
+    .top > :nth-child(3) { order: 2; } /* Cost -> right */
+    .top > :nth-child(4) { order: 1; } /* character -> left */
+  }
+  @media (max-width: 720px) { .top { grid-template-columns: 1fr; } .top > :nth-child(3), .top > :nth-child(4) { order: 0; } }
 </style>
 </head>
 <body>
-<div class="app">
+<div class="app" id="app">
   <aside>
-    <h1>Sessions</h1>
+    <h1><span>Sessions</span><button id="navbtn" title="세션 목록 접기/펼치기">&lsaquo;</button></h1>
     <div class="root" id="root"></div>
     <div id="list"></div>
     <div id="habits" class="side-habits"></div>
@@ -109,13 +122,13 @@ const usd = n => '$' + (n||0).toFixed(2);
 const short = m => (m||'').replace('claude-','').replace('-4-5-20251001','');
 const ago = ms => { if (ms < 60e3) return Math.floor(ms/1000)+'s'; if (ms < 3600e3) return Math.floor(ms/60e3)+'m'; if (ms < 86400e3) return (ms/3600e3).toFixed(1)+'h'; return (ms/86400e3).toFixed(1)+'d'; };
 const PRICE = { 'claude-fable-5-1':{in:10,out:50,read:0.025}, 'claude-fable-5':{in:10,out:50,read:0.1}, 'claude-opus-5':{in:5,out:25,read:0.1}, 'claude-sonnet-5':{in:2,out:10,read:0.1}, 'claude-haiku-4-5-20251001':{in:1,out:5,read:0.1} };
-const WHATIF = [['claude-fable-5','fable이었다면'], ['claude-opus-5','opus였다면'], ['claude-sonnet-5','sonnet이었다면'], ['claude-haiku-4-5-20251001','haiku였다면']];
+const WHATIF = [['claude-fable-5-1','fable이었다면'], ['claude-opus-5','opus였다면'], ['claude-sonnet-5','sonnet이었다면'], ['claude-haiku-4-5-20251001','haiku였다면']];
 const family = m => (m||'').startsWith('claude-fable') ? 'claude-fable-5' : m;
 function costAs(tok, model) { const p = PRICE[model]; return (tok.in*p.in + tok.cw1h*p.in*2 + (tok.cw5m+tok.cwOther)*p.in*1.25 + tok.cr*p.in*p.read + tok.out*p.out) / 1e6; }
 function whatIf(s) {
   if (!s.tok) return '';
-  const main = family(s.mainModel);
-  return `<div class="whatif">` + WHATIF.filter(([m]) => m !== main).map(([m, label]) => { const v = costAs(s.tok, m); const d = v - s.cost; return `<div><div class="wl">${label}</div><div class="wv">${usd(v)}</div><div class="wd" style="color:${d>0?'var(--bad)':'var(--ok)'}">${d>0?'+':''}${usd(d)}</div></div>`; }).join('') + `</div>`;
+  const cur = family(s.model); // exclude the model the rest of the UI shows, not the most-used one
+  return `<div class="whatif">` + WHATIF.filter(([m]) => family(m) !== cur).map(([m, label]) => { const v = costAs(s.tok, m); const d = v - s.cost; return `<div title="${m}"><div class="wl">${label}</div><div class="wv">${usd(v)}</div><div class="wd" style="color:${d>0?'var(--bad)':'var(--ok)'}">${d>0?'+':''}${usd(d)}</div></div>`; }).join('') + `</div>`;
 }
 
 let state = null, selected = null, detailCache = {}, clockSkew = 0;
@@ -375,7 +388,7 @@ function tick() {
     const mm = Math.floor(left/60e3), ss = Math.floor(left%60e3/1000); el.textContent = `${mm}:${String(ss).padStart(2,'0')}`;
     const frac = left/ttlMs; arc.setAttribute('stroke-dashoffset', String(502.6*(1-frac))); arc.setAttribute('stroke', frac > .5 ? 'var(--ok)' : frac > .2 ? 'var(--warn)' : 'var(--bad)');
     sub.textContent = '마지막 호출 ' + ago(now - s.lastCallStart) + ' 전';
-    warn.innerHTML = `<div class="sub" style="font-size:13px">깨뜨리면 <b style="color:var(--warn);font-family:var(--mono)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(현재 cost의 ${s.cost ? Math.round(100 * s.riskUsd / s.cost) : 0}%)</span></div>` + (frac < .2 ? `<div class="warnbox" style="margin-top:8px">곧 만료. 지금 치면 캐시 히트, 놓치면 ${usd(s.riskUsd)}</div>` : '');
+    warn.innerHTML = `<div class="sub" style="font-size:13px">깨뜨리면 <b style="color:var(--warn);font-family:var(--mono)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(현재 cost의 ${s.cost ? Math.round(100 * s.riskUsd / s.cost) : 0}%)</span></div>` + (frac < .2 ? `<div class="warnbox" style="margin-top:8px">곧 만료. 지금 치면 캐시 히트</div>` : '');
   } else {
     el.textContent = '만료'; arc.setAttribute('stroke-dashoffset', '502.6'); arc.setAttribute('stroke', 'var(--bad)');
     sub.textContent = ago(-left) + ' 전 만료';
@@ -386,6 +399,17 @@ function tick() {
   document.querySelectorAll('.ago').forEach(a => a.textContent = ago(now - +a.dataset.ts));
 }
 setInterval(tick, 1000);
+
+// ---- session list collapse; the choice is per-browser and survives reloads
+const NAVKEY = 'cc-monitor:nav-collapsed';
+function applyNav(on) { $('#app').classList.toggle('nav-collapsed', on); $('#navbtn').textContent = on ? '\u203a' : '\u2039'; }
+$('#navbtn').onclick = () => {
+  const on = !$('#app').classList.contains('nav-collapsed');
+  applyNav(on);
+  try { localStorage.setItem(NAVKEY, on ? '1' : '0'); } catch (e) { }
+  requestAnimationFrame(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks); }); // the canvas got wider or narrower
+};
+try { applyNav(localStorage.getItem(NAVKEY) === '1'); } catch (e) { }
 let rsz = null; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks); }, 100); });
 </script>
 </body>
