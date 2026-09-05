@@ -71,6 +71,7 @@
   table.tools td:nth-child(3) { width:40%; } .tb { height:8px; background:#232836; border-radius:4px; overflow:hidden; } .tb i { display:block; height:100%; background:#ff9f43; }
   .advice { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
   .advice b { color:var(--ok); font-family:var(--mono); } .advice.dim { color:var(--dim); font-size:12px; }
+  .advice.strong { border-top-color:var(--ok); } .advice.strong b { color:var(--ok); }
   .advice button, .mh button { background:#2a3140; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
   .advice button:hover, .mh button:hover { background:#354055; }
   .whatif.sw > div { cursor:pointer; } .whatif.sw > div:hover { background:#2a3140; }
@@ -295,7 +296,12 @@ function habitsCard(s) {
 }
 function adviceLine(s) {
   const a = s.advice; if (!a) return '';
-  if (a.recommend) return `<div class="advice"><span>압축으로 <b>${usd(a.saving)}</b> 아끼세요</span><button onclick="openAdvice()">상세</button></div>`;
+  if (a.recommend) {
+    const msg = a.strong
+      ? `압축하면 순이득 <b>${usd(a.saving)}</b> (실비 ${usd(a.compactionCost)}) — 지금 하세요`
+      : `압축으로 순이득 <b>${usd(a.saving)}</b> (실비 ${usd(a.compactionCost)}) 아끼세요`;
+    return `<div class="advice${a.strong ? ' strong' : ''}"><span>${msg}</span><button onclick="openAdvice()">상세</button></div>`;
+  }
   return `<div class="advice dim"><span>압축 이득 작음 (${fmtTok(a.dead)} 폐기물 · 손익분기 ${a.breakEven === null ? '∞' : a.breakEven + '호출'})</span><button onclick="openAdvice()">상세</button></div>`;
 }
 function openAdvice() {
@@ -313,7 +319,7 @@ function openAdvice() {
     <ul>
       <li>지금 호출당 캐시 읽기 <b>${usd(a.perCallNow)}</b> → 압축 후 <b>${usd(a.perCallAfter)}</b> (예상 ${fmtTok(a.postCtx)})</li>
       <li>이 세션 턴당 평균 호출 <b>${a.callsPerTurn.toFixed(1)}</b>회 → 턴당 <b>${usd(a.perCallNow * a.callsPerTurn)}</b></li>
-      <li>압축 비용 추정 <b>${usd(a.compactionCost)}</b> (요약 출력 + 새 컨텍스트 쓰기 + 파일 다시 읽기 80k)</li>
+      <li>압축 비용 추정 <b>${usd(a.compactionCost)}</b> (요약 출력 ${fmtTok(a.summaryTokens)} + 재작성 ${fmtTok(a.rewriteTokens)} + 다시 읽기 ${fmtTok(a.regrowthTokens)}, 고정값)</li>
       <li>손익분기 <b>${a.breakEven === null ? '∞' : a.breakEven + '호출'}</b> · 앞으로 ${a.horizon}호출 기준 순절감 <b style="color:${a.saving > 0 ? 'var(--ok)' : 'var(--bad)'}">${usd(a.saving)}</b></li>
     </ul>
     <div class="sub">추천 조건: 컨텍스트 100k 초과이고 순절감이 압축 비용보다 크면서, 폐기물 25% 이상 또는 손익분기 15호출 이하. 압축은 캐시가 살아있을 때 해야 함(만료 후 압축은 그 호출이 전체를 다시 씀).</div>
@@ -325,7 +331,10 @@ function closeAdvice() { $('#modal').hidden = true; }
 function calNote() {
   const c = state.calibration; if (!c) return '';
   const item = (label, v, n) => `${label} ${fmtTok(v)} <span style="color:${n ? 'var(--ok)' : 'var(--warn)'}">(${n ? '이 폴더 실측 n=' + n : '기본값, 샘플 없음'})</span>`;
-  return `<div class="sub" style="margin-top:8px">보정 상수: ${item('시스템 바닥', c.sys, c.n.sys)} · ${item('압축 후 요약', c.summary, c.n.summary)} · ${item('다시 읽기', c.regrowth, c.n.regrowth)}</div>`;
+  // D-9. 압축 실측 재료는 참고용일 뿐 계산(고정 상수 COMPACT)에는 안 들어간다. 표본 없으면 기본값 없이 "샘플 없음"
+  const ref = (label, v, n, fmt) => `${label} ${v == null ? '<span style="color:var(--warn)">샘플 없음</span>' : `${fmt(v)} <span style="color:var(--ok)">(n=${n})</span>`}`;
+  return `<div class="sub" style="margin-top:8px">보정 상수: ${item('시스템 바닥', c.sys, c.n.sys)} · ${item('압축 후 요약', c.summary, c.n.summary)} · ${item('다시 읽기', c.regrowth, c.n.regrowth)}</div>
+    <div class="sub" style="margin-top:4px">압축 실측(참고용 · 계산엔 안 씀): ${ref('재작성', c.rewrite, c.n.rewrite, fmtTok)} · ${ref('압축 후 컨텍스트', c.postCtx, c.n.postCtx, fmtTok)} · ${ref('압축 실비', c.extra, c.n.extra, usd)}</div>`;
 }
 function switchCells(s) {
   const w = s.switch; if (!w || !w.models.length) return '';
