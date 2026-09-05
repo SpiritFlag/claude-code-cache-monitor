@@ -61,7 +61,7 @@ function session(id) {
       ctx: 0, ttlMin: 5, calls: 0, subCalls: 0, out: 0, think: 0, cacheRead: 0, cacheWrite: 0, cost: 0,
       prompts: 0, compacts: 0, asks: 0, series: [], breaks: [], breakCost: 0, subActive: 0,
       tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {},
-      activeMs: 0, days: {},
+      activeMs: 0, days: {}, lastA: 0, promptMarks: [],
       sysTokens: 0, sysSet: false, comp: null, toolTop: [], compScale: 0,
       coldStartCw: 0, warmStartTotal: 0, firstTotal: 0, startRegrowth: null, compactions: [], compactSamples: [], byCause: {},
       projKey: '', cfgKey: '', sysSource: 'default',
@@ -83,7 +83,7 @@ function tokensOf(u) {
 }
 
 // ---- context composition (estimated from transcript text; scaled to the real context size at each call)
-const COMP_KEYS = ['user', 'assistant', 'toolInput', 'toolResult', 'reminders', 'summary', 'images'];
+const COMP_KEYS = ['summary', 'user', 'assistant', 'toolInput', 'toolResult', 'reminders', 'images'];
 const IMAGE_CHARS = 5600; // ~1600 tokens per pasted image, in char-equivalents
 function newComp() { const c = {}; for (const k of COMP_KEYS) c[k] = 0; return c; }
 function blockLen(b) {
@@ -217,6 +217,13 @@ function addDay(s, ts, ms, cost) {
   b.activeMs += ms; b.cost += cost;
 }
 
+// 세션 시작부터의 활성 누적 ms. flushGroup을 다시 부르지 않고 열린 그룹만 얹는다.
+// 활성 판정에서 빠지는 줄(사이드체인)도 시리즈에는 실리므로(F-4) 단조가 되게 고정한다.
+function activeAt(s, f, ts) {
+  const a = s.activeMs + (f.grp && f.grp.lastTs === ts ? ts - f.grp.prevTs : 0);
+  return s.lastA = Math.max(s.lastA || 0, a);
+}
+
 // 열린 그룹을 확정한다. 중간에 끊겨도 다음 그룹의 prevTs가 여기 lastTs가 되어 합이 보존된다.
 function flushGroup(f) {
   const g = f.grp; if (!g) return;
@@ -289,7 +296,7 @@ function handleRecord(f, d) {
       const c = d.message && d.message.content;
       if (d.isMeta && RESUME_RE.test(markerText(c))) f.pending.push('resume');
       const human = !d.isMeta && !f.isSub && (typeof c === 'string' || (Array.isArray(c) && c.every(b => b.type === 'text' || b.type === 'image')));
-      if (human) s.prompts++;
+      if (human) { s.prompts++; if (ts) s.promptMarks.push({ t: ts, a: activeAt(s, f, ts) }); }
       if (!f.isSub && Array.isArray(c) && c.some(b => b.type === 'tool_result')) s.pendingAsk = false;
       if (!f.isSub && c !== undefined) {
         if (d.isCompactSummary) { f.comp = newComp(); f.toolChars = {}; f.results = []; f.edited = {}; f.comp.summary += blockLen(c); }
@@ -354,7 +361,7 @@ function handleRecord(f, d) {
           if (!FREE_CAUSES.has(cause)) s.breakCost += extra;
           const bc = s.byCause[cause] = s.byCause[cause] || { n: 0, rewrite: 0, extra: 0 }; bc.n++; bc.rewrite += rewrite; bc.extra += extra;
           if (!FREE_CAUSES.has(cause) && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
-          s.breaks.push({ ts, cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total,
+          s.breaks.push({ ts, a: activeAt(s, f, ts), cause, rewrite, extra, model: m.model, from: prev.model, effort: prev.effort + '→' + d.effort, sub: f.isSub, ctx: total,
             prevIn: prev.in, prevCr: prev.cr, prevTotal: prev.total, curIn: t.in, curCw: t.cw, curCr: t.cr,
             cw1h: t.cw1h, cw5m: t.cw5m, shrink, grew, gapMin, prefixIntact, events });
           if (s.breaks.length > 60) s.breaks.shift();
@@ -380,7 +387,7 @@ function handleRecord(f, d) {
         f.callIdx++;
         const sc = scaledComp(f, total, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale;
         s.advice = compactAdvice(f, s, total, sc.scale);
-        s.series.push({ t: ts, ctx: total, cw: t.cw, cr: t.cr, m: m.model, c: [sc.comp.sys, ...COMP_KEYS.map(k => sc.comp[k])] });
+        s.series.push({ t: ts, a: activeAt(s, f, ts), ctx: total, cw: t.cw, cr: t.cr, m: m.model, c: [sc.comp.sys, ...COMP_KEYS.map(k => sc.comp[k])] });
         if (s.series.length > 4000) s.series.splice(0, s.series.length - 4000);
       }
       return;
@@ -450,7 +457,7 @@ function detail(id) {
   const s = sessions.get(id); if (!s) return null;
   const pts = s.series; const step = Math.max(1, Math.ceil(pts.length / 600));
   const series = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
-  return { id, series, breaks: s.breaks.slice(-40) };
+  return { id, series, breaks: s.breaks.slice(-40), prompts: s.promptMarks };
 }
 
 // ---------------- server ----------------
