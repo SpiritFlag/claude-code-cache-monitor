@@ -401,19 +401,25 @@ function charState(s, now) {
 // ---------------- snapshot ----------------
 function snapshot() {
   const now = Date.now();
-  const list = [...sessions.values()].filter(s => s.calls > 0).sort((a, b) => b.lastTs - a.lastTs).map(s => ({
+  const list = [...sessions.values()].filter(s => s.calls > 0).sort((a, b) => b.lastTs - a.lastTs).map(s => {
+    const p = price(s.model);
+    const continueThreshold = (s.sysTokens || CAL.sys) + CAL.regrowth;
+    const riskUsd = s.ctx * p.in * 2 / 1e6;
+    // D-12. freshCost: 새 세션에서 바닥+다시읽기까지 다시 쓰는 비용. costDelta 양수면 새 세션이 싸다
+    const freshCost = continueThreshold * p.in * 2 / 1e6;
+    return {
     id: s.id, title: s.title || '(untitled)', cwd: s.cwd, entry: s.entry, model: s.model, effort: s.effort, skill: s.skill,
     firstTs: s.firstTs, lastTs: s.lastTs, lastCallStart: s.lastCallStart, lastCallEnd: s.lastCallEnd, lastStop: s.lastStop, lastTool: s.lastTool,
     ctx: s.ctx, ttlMin: s.ttlMin, calls: s.calls, subCalls: s.subCalls, out: s.out, think: s.think, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite,
     cost: s.cost, prompts: s.prompts, compacts: s.compacts, asks: s.asks, breakCost: s.breakCost,
-    riskUsd: s.ctx * price(s.model).in * 2 / 1e6,
+    riskUsd, freshCost, costDelta: riskUsd - freshCost,
     tok: s.tok, mainModel: Object.entries(s.modelCalls).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || s.model,
     comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, switch: s.switch || null, sysTokens: s.sysTokens, sysSource: s.sysSource, cfgKey: s.cfgKey, projKey: s.projKey, byCause: s.byCause,
-    continueThreshold: (s.sysTokens || CAL.sys) + CAL.regrowth,
+    continueThreshold,
     saved: s.saved, commits: s.commits, lateCalls: s.lateCalls, nightCalls: s.nightCalls, streak: s.streak, bestStreak: s.bestStreak,
     charState: charState(s, now), // after TTL expiry: continuing beats a new session iff ctx < system floor + regrowth (price/horizon independent)
     busy: s.lastStop === 'tool_use' && now - s.lastTs < 3 * 60e3, subActive: now - s.subActive < 3 * 60e3,
-  }));
+  };});
   return { version, root: ROOT, now, calibration: CAL, sessions: list };
 }
 function detail(id) {

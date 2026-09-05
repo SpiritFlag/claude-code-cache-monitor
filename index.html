@@ -231,6 +231,7 @@ function renderMain() {
       <div class="card"><h2>Context</h2><div class="big">${fmtTok(s.ctx)}</div>
         <div class="bar"><i style="width:${Math.min(100, s.ctx/1e6*100)}%"></i></div>
         <div class="sub">of 1M window · cacheR ${fmtTok(s.cacheRead)} · cacheW ${fmtTok(s.cacheWrite)} · compacts ${s.compacts}</div>
+        ${riskLine(s)}
         ${adviceLine(s)}
         ${switchCells(s)}
         ${(s.ctx > s.continueThreshold && (Date.now() + clockSkew) < s.lastCallStart + s.ttlMin * 60e3) ? `<div class="sub" style="margin-top:10px;color:var(--warn)">캐시 만료 후 이 세션을 꼭 이어가야 한다면 compact를 미리 해주세요</div>` : ''}
@@ -293,6 +294,10 @@ function habitsCard(s) {
   const free = sumCauses(s.byCause, ['compact', 'breakpoint_shift']);
   return `<table class="habits"><tr><th></th><th>이 세션</th><th>폴더 전체</th></tr>` + rows.map((r, k) => `<tr class="${r.mine.n ? '' : 'dim'}"><td>${k + 1}. ${r.label}</td><td>${r.mine.n ? r.mine.n + '건 · <b>' + usd(r.mine.extra) + '</b>' : '<span class="z">0</span>'}</td><td>${r.folder.n ? r.folder.n + '건 · ' + usd(r.folder.extra) : '<span class="z">0</span>'}</td></tr>`).join('') + `</table>` +
     `<div class="sub" style="margin-top:8px">압축·브레이크포인트 이동(정상) ${free.n}건 ${usd(free.extra)}은 제외 · 비용 = 다시 쓴 토큰 × (쓰기 − 읽기 단가)</div>`;
+}
+function riskLine(s) {
+  // D-11. 컨텍스트 카드 상시 표시 — TTL 링 옆 경고(남은 시간과 함께 읽음)와 달리 이건 그냥 규모
+  return `<div class="sub" style="margin-top:8px">지금 사고 나면 <b style="color:var(--warn)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(컨텍스트 ${fmtTok(s.ctx)} 재작성)</span></div>`;
 }
 function adviceLine(s) {
   const a = s.advice; if (!a) return '';
@@ -398,6 +403,13 @@ function drawChart(series, breaks) {
   for (const b of breaks) if (!b.sub) { ctx.strokeStyle = bc[b.cause] || '#b58cff'; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(X(b.ts), T); ctx.lineTo(X(b.ts), H-B); ctx.stroke(); ctx.setLineDash([]); }
 }
 
+function resumeBox(s) {
+  // D-12. TTL 만료 후 갈림길 — 이어가기(riskUsd) vs 새 세션(freshCost), 차액(costDelta)이 방향을 정한다
+  const ok = s.costDelta < 0; // 이어가기가 싸다
+  return `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
+    <div class="sub" style="margin-top:6px">이어가기 <b>${usd(s.riskUsd)}</b> · 새 세션 <b>${usd(s.freshCost)}</b> · 차액 <b style="color:${ok ? 'var(--ok)' : 'var(--warn)'}">${usd(Math.abs(s.costDelta))}</b> (${ok ? '이어가기가' : '새 세션이'} 쌈)</div>
+    <div class="sub" style="margin-top:4px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, ${SYS_SRC[s.sysSource] || '추정'}) · 지금 ${fmtTok(s.ctx)}</div>`;
+}
 function tick() {
   if (!state) return; const s = state.sessions.find(x => x.id === selected); if (!s) return;
   const now = Date.now()+clockSkew; const ttlMs = s.ttlMin*60e3; const left = s.lastCallStart + ttlMs - now;
@@ -410,9 +422,7 @@ function tick() {
   } else {
     el.textContent = '만료'; arc.setAttribute('stroke-dashoffset', '502.6'); arc.setAttribute('stroke', 'var(--bad)');
     sub.textContent = ago(-left) + ' 전 만료';
-    const ok = s.ctx < s.continueThreshold;
-    warn.innerHTML = `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
-      <div class="sub" style="margin-top:6px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, ${SYS_SRC[s.sysSource] || '추정'}) · 지금 ${fmtTok(s.ctx)} · 이어가면 ${usd(s.riskUsd)} 재작성</div>`;
+    warn.innerHTML = resumeBox(s);
   }
   document.querySelectorAll('.ago').forEach(a => a.textContent = ago(now - +a.dataset.ts));
 }
