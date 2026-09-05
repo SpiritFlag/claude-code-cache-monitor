@@ -83,7 +83,7 @@ function tokensOf(u) {
 }
 
 // ---- context composition (estimated from transcript text; scaled to the real context size at each call)
-const COMP_KEYS = ['user', 'assistant', 'toolInput', 'toolResult', 'reminders', 'summary', 'images'];
+const COMP_KEYS = ['summary', 'user', 'assistant', 'toolInput', 'toolResult', 'reminders', 'images'];
 const IMAGE_CHARS = 5600; // ~1600 tokens per pasted image, in char-equivalents
 function newComp() { const c = {}; for (const k of COMP_KEYS) c[k] = 0; return c; }
 function blockLen(b) {
