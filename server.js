@@ -60,7 +60,7 @@ function session(id) {
       firstTs: 0, lastTs: 0, lastCallStart: 0, lastCallEnd: 0, lastStop: '', lastTool: '',
       ctx: 0, ttlMin: 5, calls: 0, subCalls: 0, out: 0, think: 0, cacheRead: 0, cacheWrite: 0, cost: 0,
       prompts: 0, compacts: 0, asks: 0, series: [], breaks: [], breakCost: 0, subActive: 0,
-      tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {}, tokByModel: {}, costByModel: {},
+      tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {},
       sysTokens: 0, sysSet: false, comp: null, toolTop: [], compScale: 0,
       coldStartCw: 0, warmStartTotal: 0, firstTotal: 0, startRegrowth: null, compactions: [], compactSamples: [], byCause: {},
       projKey: '', cfgKey: '', sysSource: 'default',
@@ -193,56 +193,6 @@ function compactAdvice(f, s, total, scale) {
     recommend, strong: recommend && saving >= compactionCost * STRONG_RATIO };
 }
 
-const family = m => (m || '').startsWith('claude-fable') ? 'claude-fable-5' : m;
-
-// ---- model comparison: what this session's actual tokens would have cost under each model's pricing
-// D-13(질문 q1로 개정). "현재 모델"은 family()로 묶어 판정 — 세션이 실제 쓴 마지막 모델이 비교 목록의
-// 대표 모델과 계열만 같으면(fable-5 실사용 -> fable-5-1 칸) "현재"로 표시한다. 배수가 1.00×가 아닐 수
-// 있는데(단가가 다르면) 그대로 보여준다 — 이 카드 전체가 재미로 보는 추정치라는 문구를 화면에 남긴다(D-9 톤)
-const COMPARE_MODELS = [
-  ['claude-fable-5-1', 'fable'], ['claude-opus-5', 'opus'],
-  ['claude-sonnet-5', 'sonnet'], ['claude-haiku-4-5-20251001', 'haiku'],
-];
-function costAsTok(tok, model) {
-  const p = price(model);
-  return (tok.in * p.in + tok.cw1h * p.in * 2 + (tok.cw5m + tok.cwOther) * p.in * 1.25
-        + tok.cr * p.in * p.read + tok.out * p.out) / 1e6;
-}
-function modelCompare(s) {
-  const breakdown = Object.entries(s.costByModel).map(([model, cost]) => ({ model, calls: s.modelCalls[model] || 0, cost })).sort((a, b) => b.cost - a.cost);
-  const actual = s.cost;
-  // D-14. 넷 다 항상 렌더한다 — 현재 모델 칸도 빼지 않는다
-  const curFamily = family(s.model);
-  const rows = COMPARE_MODELS.map(([model, label]) => {
-    const cost = costAsTok(s.tok, model);
-    return { model, label, cost, ratio: actual ? cost / actual : null, current: family(model) === curFamily };
-  });
-  return { actual, mixed: Object.keys(s.costByModel).length > 1, breakdown, rows };
-}
-
-// ---- model switch advice: is downgrading worth it, and how (continue / new session / compact then switch)
-const SWITCH_MODELS = [['claude-fable-5', 'fable'], ['claude-opus-5', 'opus'], ['claude-sonnet-5', 'sonnet']]; // haiku deliberately excluded: never a real candidate
-
-// ---- escalation advice: "I'm stuck, I want a stronger model" — how to do it without paying for the whole context twice
-function escalationAdvice(s, total) {
-  const cur = s.model; const pc = price(cur);
-  const sys = s.sysTokens || CAL.sys, SUMMARY = CAL.summary, REGROWTH = CAL.regrowth;
-  const used = {}; let allCalls = 0; for (const x of sessions.values()) for (const [m, n] of Object.entries(x.modelCalls)) { used[family(m)] = (used[family(m)] || 0) + n; allCalls += n; }
-  const models = SWITCH_MODELS.filter(([m]) => m !== family(cur) && price(m).in > pc.in && (used[m] || 0) >= allCalls * 0.01).map(([m, label]) => {
-    const p = price(m); const w = x => x * p.in * 2 / 1e6; const wc = x => x * pc.in * 2 / 1e6;
-    const opts = [
-      { name: 'effort 올리기 (모델 유지)', go: wc(total), back: 0, keep: true, note: '같은 모델에서 재작성만. 먼저 시도할 것' },
-      { name: '옆 세션 상담', go: w(sys), back: 0, keep: true, note: '문제만 붙여넣고 답 받아오기. 이 세션은 TTL 안에 돌아오면 캐시 그대로' },
-      { name: '압축 후 전환', go: (SUMMARY * pc.out + (sys + SUMMARY + REGROWTH) * p.in * 2) / 1e6, back: wc(sys + SUMMARY + REGROWTH), keep: false, note: '요약은 남음' },
-      { name: '새 세션', go: w(sys + REGROWTH), back: wc(sys + REGROWTH), keep: false, note: '맥락 포기' },
-      { name: '이어가기', go: w(total), back: wc(total), keep: true, note: '컨텍스트 전체를 두 번 다시 씀' },
-    ].map(o => ({ ...o, total: o.go + o.back }));
-    const cheapest = opts.slice(1).reduce((a, b) => b.total < a.total ? b : a); // excluding the effort step (not a model switch)
-    return { model: m, label, options: opts, best: cheapest.name, bestCost: cheapest.total, inSession: opts[4].total, effortCost: opts[0].go };
-  });
-  return { models, ttlMin: s.ttlMin };
-}
-
 function scaledComp(f, total, sys) {
   const chars = f.comp; let sum = 0; for (const k of COMP_KEYS) sum += chars[k];
   const avail = Math.max(0, total - sys); const scale = sum ? avail / sum : 0;
@@ -327,10 +277,6 @@ function handleRecord(f, d) {
       s.cost += cost; s.out += t.out; s.think += t.think; s.cacheRead += t.cr; s.cacheWrite += t.cw;
       s.tok.in += t.in; s.tok.cw1h += t.cw1h; s.tok.cw5m += t.cw5m; s.tok.cwOther += Math.max(0, t.cw - t.cw1h - t.cw5m); s.tok.cr += t.cr; s.tok.out += t.out;
       s.modelCalls[m.model] = (s.modelCalls[m.model] || 0) + 1;
-      // D-13 · D-14. 모델별 실측 토큰·실비 누적 — modelCompare()의 breakdown 재료
-      { const tm = s.tokByModel[m.model] = s.tokByModel[m.model] || { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 };
-        tm.in += t.in; tm.cw1h += t.cw1h; tm.cw5m += t.cw5m; tm.cwOther += Math.max(0, t.cw - t.cw1h - t.cw5m); tm.cr += t.cr; tm.out += t.out;
-        s.costByModel[m.model] = (s.costByModel[m.model] || 0) + cost; }
       { const pp = price(m.model); s.saved += t.cr * pp.in * (1 - pp.read) / 1e6; } // what caching saved vs. paying list price for those tokens
       if (ts) { const h = (new Date(ts).getUTCHours() + 9) % 24; if (h >= 19 || h < 6) s.lateCalls++; if (h < 6) s.nightCalls++; }
       let brokeNow = false;
@@ -386,7 +332,6 @@ function handleRecord(f, d) {
         f.callIdx++;
         const sc = scaledComp(f, total, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale;
         s.advice = compactAdvice(f, s, total, sc.scale);
-        s.switch = escalationAdvice(s,total);
         s.series.push({ t: ts, ctx: total, cw: t.cw, cr: t.cr, m: m.model, c: [sc.comp.sys, ...COMP_KEYS.map(k => sc.comp[k])] });
         if (s.series.length > 4000) s.series.splice(0, s.series.length - 4000);
       }
@@ -443,9 +388,8 @@ function snapshot() {
     ctx: s.ctx, ttlMin: s.ttlMin, calls: s.calls, subCalls: s.subCalls, out: s.out, think: s.think, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite,
     cost: s.cost, prompts: s.prompts, compacts: s.compacts, asks: s.asks, breakCost: s.breakCost,
     riskUsd, freshCost, costDelta: riskUsd - freshCost,
-    tok: s.tok, mainModel: Object.entries(s.modelCalls).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || s.model,
-    modelCompare: modelCompare(s),
-    comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, switch: s.switch || null, sysTokens: s.sysTokens, sysSource: s.sysSource, cfgKey: s.cfgKey, projKey: s.projKey, byCause: s.byCause,
+    tok: s.tok,
+    comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, sysTokens: s.sysTokens, sysSource: s.sysSource, cfgKey: s.cfgKey, projKey: s.projKey, byCause: s.byCause,
     continueThreshold,
     saved: s.saved, commits: s.commits, lateCalls: s.lateCalls, nightCalls: s.nightCalls, streak: s.streak, bestStreak: s.bestStreak,
     charState: charState(s, now), // after TTL expiry: continuing beats a new session iff ctx < system floor + regrowth (price/horizon independent)
@@ -472,7 +416,7 @@ function recomputeAdvice() {
     // D-6. 보정이 스캔마다 달라지므로 cold-self가 아닌 세션은 매번 사다리를 다시 탄다
     const r = resolveSys(s, s.ctx); s.sysTokens = r.sys; s.sysSource = r.source;
     if (r.source !== 'cold-self') { const sc = scaledComp(f, s.ctx, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale; }
-    s.advice = compactAdvice(f, s, s.ctx, s.compScale); s.switch = escalationAdvice(s,s.ctx);
+    s.advice = compactAdvice(f, s, s.ctx, s.compScale);
   }
 }
 
