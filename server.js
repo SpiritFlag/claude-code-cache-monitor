@@ -161,6 +161,8 @@ function callCost(model, t) {
 }
 
 function handleRecord(f, d) {
+  // 재기록 구간: CC가 재개하며 이력을 다시 쓴 행은 uuid가 같다. 종류 불문 한 번만 센다.
+  if (d.uuid) { if (f.uuidSeen.has(d.uuid)) return; f.uuidSeen.add(d.uuid); }
   if (d.sessionId) f.sessionId = d.sessionId;
   if (!f.sessionId) return;
   const s = session(f.sessionId);
@@ -183,9 +185,7 @@ function handleRecord(f, d) {
       if (d.isCompactSummary) f.pending.push('compact');
       if (!f.isSub) f.lastUserTs = ts;
       const c = d.message && d.message.content;
-      if (d.isMeta && RESUME_RE.test(markerText(c))) {
-        if (!f.markerSeen.has(d.uuid)) { f.markerSeen.add(d.uuid); f.pending.push('resume'); }
-      }
+      if (d.isMeta && RESUME_RE.test(markerText(c))) f.pending.push('resume');
       const human = !d.isMeta && !f.isSub && (typeof c === 'string' || (Array.isArray(c) && c.every(b => b.type === 'text' || b.type === 'image')));
       if (human) s.prompts++;
       if (!f.isSub && Array.isArray(c) && c.some(b => b.type === 'tool_result')) s.pendingAsk = false;
@@ -279,9 +279,9 @@ function handleRecord(f, d) {
 
 function readFile(fp) {
   let f = files.get(fp);
-  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), markerSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
+  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), uuidSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
   let st; try { st = fs.statSync(fp); } catch { return; }
-  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.markerSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.uuidSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
   if (st.size === f.offset) return;
   const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
   fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
