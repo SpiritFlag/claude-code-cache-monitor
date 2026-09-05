@@ -1,0 +1,5 @@
+{"type":"user","sessionId":"s-active-dayline","uuid":"u-ad-0","timestamp":"2026-09-01T19:58:00.000Z","message":{"content":"start"}}
+{"type":"assistant","sessionId":"s-active-dayline","uuid":"u-ad-1","timestamp":"2026-09-01T19:59:00.000Z","requestId":"d1","effort":"high","message":{"id":"m1","model":"claude-sonnet-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":10},"content":[{"type":"text","text":"a"}],"stop_reason":"end_turn"}}
+{"type":"user","sessionId":"s-active-dayline","uuid":"u-ad-2","timestamp":"2026-09-01T19:59:30.000Z","message":{"content":"next"}}
+{"type":"assistant","sessionId":"s-active-dayline","uuid":"u-ad-3","timestamp":"2026-09-01T20:00:00.000Z","requestId":"d2","effort":"high","message":{"id":"m2","model":"claude-sonnet-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":100,"output_tokens":10},"content":[{"type":"text","text":"b"}],"stop_reason":"end_turn"}}
+{"type":"user","sessionId":"s-active-dayline","uuid":"u-ad-4","timestamp":"2026-09-01T20:00:30.000Z","message":{"content":"done"}}

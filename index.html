@@ -23,6 +23,9 @@
   .char .bubble { background:#232836; border-radius:12px; padding:9px 14px; position:relative; font-size:14px; font-weight:600; text-align:center; max-width:100%; }
   .char .bubble::after { content:''; position:absolute; left:50%; bottom:-8px; margin-left:-8px; border:8px solid transparent; border-top-color:#232836; border-bottom:0; }
   .char img { width:170px; height:170px; image-rendering:auto; }
+  /* 아바타 아래 모델명 이름표: 말풍선 두 개가 위아래로 마주보면 어색해서 꼬리 없이 둥근 배지로만 둔다 */
+  .char .bubble.down { font-size:12px; font-weight:500; color:var(--dim); padding:6px 12px; }
+  .char .bubble.down::after { display:none; }
   .hero { display:flex; gap:14px; align-items:center; }
   .hero .lv { font: 800 44px/1 var(--mono); color:var(--acc); } .hero .lv small { font-size:14px; color:var(--dim); margin-right:4px; }
   .stats { display:grid; grid-template-columns:repeat(2,1fr); gap:6px; margin-top:12px; }
@@ -60,9 +63,16 @@
   .ring .num .big { font-size:40px; }
   .bar { height:10px; background:#232836; border-radius:5px; overflow:hidden; margin-top:10px; }
   .bar i { display:block; height:100%; background:var(--acc); }
-  .whatif { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
-  .whatif > div { background:#232836; border-radius:6px; padding:6px 8px; text-align:center; }
-  .whatif .wl { font-size:11px; color:var(--dim); } .whatif .wv { font: 600 15px var(--mono); margin-top:2px; } .whatif .wd { font: 11px var(--mono); }
+  /* 연비 3줄: 세로로 쌓인 가로 트랙 위에 값 위치를 원으로 찍는다($0~100/h 척도) */
+  .fuel { display:flex; flex-direction:column; gap:8px; margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
+  .fuel .fuel-h { font-size:11px; color:var(--dim); font-weight:600; letter-spacing:.04em; text-transform:uppercase; margin-bottom:2px; }
+  .fuel-row { display:flex; align-items:center; gap:8px; }
+  .fuel-row .fl { width:50px; flex:none; font-size:11px; color:var(--dim); }
+  .fuel-row .ftrack { position:relative; flex:1; height:4px; background:#232836; border-radius:2px; }
+  .fuel-row .fdot { position:absolute; top:50%; width:10px; height:10px; margin-top:-5px; margin-left:-5px; border-radius:50%; background:var(--acc); }
+  .fuel-row .fv { flex:none; display:flex; align-items:baseline; }
+  .fuel-row .fv .amt { width:58px; text-align:right; font: 600 12px var(--mono); }
+  .fuel-row .fv .fd { width:56px; text-align:right; font: 11px var(--mono); font-weight:400; color:var(--dim); }
   .stack { display:flex; height:22px; border-radius:6px; overflow:hidden; background:#232836; }
   .stack i { display:block; height:100%; min-width:1px; }
   .legend { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px; font-size:12px; color:var(--dim); }
@@ -74,9 +84,6 @@
   .advice.strong { border-top-color:var(--ok); } .advice.strong b { color:var(--ok); }
   .advice button, .mh button { background:#2a3140; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
   .advice button:hover, .mh button:hover { background:#354055; }
-  .whatif.sw > div { cursor:pointer; } .whatif.sw > div:hover { background:#2a3140; }
-  .whatif > div.current { background:#1f2d24; border:1px solid var(--ok); } .whatif > div.current .wv { color:var(--ok); }
-  .modal tr.best td { background:#1f2d24; } .modal tr.best td:first-child::after { content:' ✓'; color:var(--ok); }
   .modal[hidden] { display:none; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:10; }
   .modal .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(640px, 92vw); padding:18px 22px; max-height:85vh; overflow:auto; }
@@ -97,7 +104,7 @@
   .warnbox { border-left:3px solid var(--bad); background:#2a1a1a; padding:10px 12px; border-radius:6px; font-size:13px; }
   .okbox { border-left:3px solid var(--ok); background:#172a1f; padding:10px 12px; border-radius:6px; font-size:13px; }
   /* narrow layouts: 4-up top row folds so Cost and the character drop to a second line.
-     On that second line they swap: the character fits the 280px column, Cost needs the wide one for its 3-up whatif grid. */
+     On that second line they swap: the character fits the 280px column, Cost needs the wide one so the 연비 rows keep a readable track next to their fixed-width values. */
   @media (max-width: 1280px) {
     .top { grid-template-columns: 280px 1fr; }
     .top > :nth-child(3) { order: 2; } /* Cost -> right */
@@ -123,19 +130,10 @@ const fmtTok = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFix
 const usd = n => '$' + (n||0).toFixed(2);
 const short = m => (m||'').replace('claude-','').replace('-4-5-20251001','');
 const ago = ms => { if (ms < 60e3) return Math.floor(ms/1000)+'s'; if (ms < 3600e3) return Math.floor(ms/60e3)+'m'; if (ms < 86400e3) return (ms/3600e3).toFixed(1)+'h'; return (ms/86400e3).toFixed(1)+'d'; };
-// D-13(질문 q1로 개정) · D-14. 모델 비교 4칸은 서버가 계산해 내려준다(modelCompare) — "현재"는
-// family()로 묶어 판정해 마지막 실사용 모델 계열을 따라간다. 단가가 다르면 배수가 1.00×가 아닐 수
-// 있는데 그대로 보여준다(재미로 보는 추정치라 정밀도를 안 따진다)
-function modelCard(s) {
-  const mc = s.modelCompare; if (!mc || !mc.rows.length) return '';
-  const rows = mc.rows.map(r => `<div class="${r.current ? 'current' : ''}" title="${r.model}">
-      <div class="wl">${r.label}${r.current ? ' · 현재' : ''}</div>
-      <div class="wv">${usd(r.cost)}</div>
-      <div class="wd">${r.ratio == null ? '-' : r.ratio.toFixed(2) + '×'}</div>
-    </div>`).join('');
-  const breakdown = mc.mixed ? `<div class="sub" style="margin-top:8px">혼용 세션 실비: ${mc.breakdown.map(b => `${short(b.model)} ${usd(b.cost)} (${b.calls}회)`).join(' · ')}</div>` : '';
-  return `<div class="whatif" style="grid-template-columns:repeat(${mc.rows.length},1fr)">${rows}</div>${breakdown}<div class="sub" style="margin-top:6px;color:var(--dim)">재미로 보는 추정치 · 실제 과금과 다를 수 있음</div>`;
-}
+const DAY_SHIFT = 4 * 3600e3;
+const dayKey = ts => new Date(ts + DAY_SHIFT).toISOString().slice(0, 10);
+const hrs = ms => { const h = ms / 3600e3; return h >= 1 ? h.toFixed(1) + 'h' : Math.round(ms / 60e3) + 'm'; };
+const perHrNum = (cost, ms) => ms > 0 ? cost / (ms / 3600e3) : null;
 
 let state = null, selected = null, detailCache = {}, clockSkew = 0;
 
@@ -179,7 +177,32 @@ const LINES = { broke: '아야… 다시 다 읽었어요', asking: '형, 어떻
 const WHY = s => ({ broke: '3분 내 피할 수 있던 캐시 깨짐', asking: '질문 띄우고 답 기다리는 중', working: '도구 호출 중', full: `컨텍스트 ${fmtTok(s.ctx)}`, sleepy: 'TTL 12분 미만', asleep: `만료 · ${fmtTok(s.ctx)} < 임계 ${fmtTok(s.continueThreshold)}`, amnesia: `만료 · ${fmtTok(s.ctx)} ≥ 임계 ${fmtTok(s.continueThreshold)}`, idle: '' })[s.charState] || '';
 function charCard(s) {
   const st = s.charState || 'idle';
-  return `<div class="char"><div class="bubble" title="${st} · ${WHY(s)}">${LINES[st] || ''}</div><img src="/img/${st}.png" alt="${st}"></div>`;
+  return `<div class="char"><div class="bubble" title="${st} · ${WHY(s)}">${LINES[st] || ''}</div>`
+    + `<img src="/img/${st}.png" alt="${st}">`
+    + `<div class="bubble down">${short(s.model)}</div></div>`;
+}
+// Cost 카드의 연비 3줄: 이 세션 · 오늘(이 세션이 속한 하루, 폴더 전체 집계) · 이 기기(폴더 전체 누적).
+// 시간당 비용을 $0~100/h 척도의 가로 트랙 위에 원으로 찍고, 값과 활성시간은 트랙 오른쪽에 적는다.
+const FUEL_SCALE = 100;
+function fuelCells(s) {
+  const fo = state.folder; if (!fo) return '';
+  const today = fo.days[dayKey(s.lastTs)] || { activeMs: 0, cost: 0 };
+  const rows = [
+    ['이 세션', perHrNum(s.cost, s.activeMs), s.activeMs],
+    ['오늘', perHrNum(today.cost, today.activeMs), today.activeMs],
+    ['이 기기', perHrNum(fo.cost, fo.activeMs), fo.activeMs],
+  ];
+  return `<div class="fuel" title="시간당 비용 · $0~${FUEL_SCALE}/h 척도 · 활성시간 = 모델이 실제로 돌던 시간만 합산, 대기·생각 시간 제외. 하루 경계는 KST 05시">`
+    + `<div class="fuel-h">활성 시간 대비 COST</div>`
+    + rows.map(([label, perHr, ms]) => {
+      const pct = perHr == null ? 0 : Math.min(100, perHr / FUEL_SCALE * 100);
+      return `<div class="fuel-row">
+        <div class="fl">${label}</div>
+        <div class="ftrack"><i class="fdot" style="left:${pct}%"></i></div>
+        <div class="fv"><span class="amt">${perHr == null ? '-' : usd(perHr) + '/h'}</span><span class="fd">활성 ${hrs(ms)}</span></div>
+      </div>`;
+    }).join('')
+    + `</div>`;
 }
 // ---- RPG character sheet: XP accrues across the whole folder; the session shows what it added
 const xpOf = s => Math.max(0, Math.round(10 * (s.saved || 0) + 25 * (s.commits || 0) + (s.prompts || 0)));
@@ -236,15 +259,14 @@ function renderMain() {
       <div class="card"><h2>Context</h2><div class="big">${fmtTok(s.ctx)}</div>
         <div class="bar"><i style="width:${Math.min(100, s.ctx/1e6*100)}%"></i></div>
         <div class="sub">of 1M window · cacheR ${fmtTok(s.cacheRead)} · cacheW ${fmtTok(s.cacheWrite)} · compacts ${s.compacts}</div>
-        ${riskLine(s)}
         ${adviceLine(s)}
-        ${switchCells(s)}
+        ${principleLine()}
         ${(s.ctx > s.continueThreshold && (Date.now() + clockSkew) < s.lastCallStart + s.ttlMin * 60e3) ? `<div class="sub" style="margin-top:10px;color:var(--warn)">캐시 만료 후 이 세션을 꼭 이어가야 한다면 compact를 미리 해주세요</div>` : ''}
       </div>
       <div class="card"><h2>Cost (API 환산)</h2><div class="big">${usd(s.cost)}</div>
         <div class="sub">out ${fmtTok(s.out)} · think ${s.out?Math.round(100*s.think/s.out):0}% · calls ${s.calls}${s.subCalls?' +'+s.subCalls+' sub':''}</div>
         <div class="sub" style="margin-top:10px">캐시 깨짐 손실 <b style="color:var(--bad)">${usd(s.breakCost)}</b> (${d.breaks.length}건)</div>
-        ${modelCard(s)}
+        ${fuelCells(s)}
       </div>
       <div class="card">${charCard(s)}</div>
     </div>
@@ -300,9 +322,9 @@ function habitsCard(s) {
   return `<table class="habits"><tr><th></th><th>이 세션</th><th>폴더 전체</th></tr>` + rows.map((r, k) => `<tr class="${r.mine.n ? '' : 'dim'}"><td>${k + 1}. ${r.label}</td><td>${r.mine.n ? r.mine.n + '건 · <b>' + usd(r.mine.extra) + '</b>' : '<span class="z">0</span>'}</td><td>${r.folder.n ? r.folder.n + '건 · ' + usd(r.folder.extra) : '<span class="z">0</span>'}</td></tr>`).join('') + `</table>` +
     `<div class="sub" style="margin-top:8px">압축·브레이크포인트 이동(정상) ${free.n}건 ${usd(free.extra)}은 제외 · 비용 = 다시 쓴 토큰 × (쓰기 − 읽기 단가)</div>`;
 }
-function riskLine(s) {
-  // D-11. 컨텍스트 카드 상시 표시 — TTL 링 옆 경고(남은 시간과 함께 읽음)와 달리 이건 그냥 규모
-  return `<div class="sub" style="margin-top:8px">지금 사고 나면 <b style="color:var(--warn)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(컨텍스트 ${fmtTok(s.ctx)} 재작성)</span></div>`;
+// D-3. 모델 전환 사다리가 있던 자리 — "세션 안에서 모델을 바꾸지 않는다"는 원칙 한 줄로 대신한다
+function principleLine() {
+  return `<div class="sub" style="margin-top:10px">모델은 세션 안에서 바꾸지 않습니다 — 바꾸면 컨텍스트 전체를 다시 씁니다</div>`;
 }
 function adviceLine(s) {
   const a = s.advice; if (!a) return '';
@@ -345,28 +367,6 @@ function calNote() {
   const ref = (label, v, n, fmt) => `${label} ${v == null ? '<span style="color:var(--warn)">샘플 없음</span>' : `${fmt(v)} <span style="color:var(--ok)">(n=${n})</span>`}`;
   return `<div class="sub" style="margin-top:8px">보정 상수: ${item('시스템 바닥', c.sys, c.n.sys)} · ${item('압축 후 요약', c.summary, c.n.summary)} · ${item('다시 읽기', c.regrowth, c.n.regrowth)}</div>
     <div class="sub" style="margin-top:4px">압축 실측(참고용 · 계산엔 안 씀): ${ref('재작성', c.rewrite, c.n.rewrite, fmtTok)} · ${ref('압축 후 컨텍스트', c.postCtx, c.n.postCtx, fmtTok)} · ${ref('압축 실비', c.extra, c.n.extra, usd)}</div>`;
-}
-function switchCells(s) {
-  const w = s.switch; if (!w || !w.models.length) return '';
-  return `<div class="whatif sw" style="grid-template-columns:repeat(${w.models.length},1fr)">` + w.models.map((m, i) => `<div onclick="openSwitch(${i})" title="클릭: 올리는 방법 사다리"><div class="wl">${m.label}로 올리면</div><div class="wv" style="color:var(--ok)">${usd(m.bestCost)}</div><div class="wd">${m.best} · 이어가면 ${usd(m.inSession)}</div></div>`).join('') + `</div><div class="sub" style="margin-top:6px">갑갑할 때: 가는 비용 + 돌아오는 비용 합계 · effort 올리기는 ${usd(w.models[0].effortCost)}</div>`;
-}
-function openSwitch(i) {
-  const s = state.sessions.find(x => x.id === selected); const w = s && s.switch; if (!w) return; const m = w.models[i];
-  const rows = m.options.map((o, k) => `<tr class="${o.name === m.best ? 'best' : ''}"><td>${k + 1}. ${o.name}</td><td>${usd(o.go)}</td><td>${o.back ? usd(o.back) : '<span style="color:var(--ok)">0</span>'}</td><td><b>${usd(o.total)}</b></td><td>${o.keep ? '유지' : '요약/포기'}</td><td class="sub">${o.note}</td></tr>`).join('');
-  $('#modal').innerHTML = `<div class="box">
-    <div class="mh"><span>갑갑할 때: ${short(s.model)} → ${m.label} · ${esc(s.title)}</span><button onclick="closeAdvice()">✕</button></div>
-    <h3>행동지침 <em>지금 컨텍스트 ${fmtTok(s.ctx)} 기준</em></h3>
-    <ol>
-      <li>먼저 <b>effort</b>를 올려봐 (${usd(m.effortCost)}, 모델 전환의 몇 분의 일).</li>
-      <li>그래도 답답하면 <b>옆 세션</b>을 열어 상위 모델에게 문제만 물어봐. 이 세션은 TTL ${w.ttlMin}분 안에 돌아오면 캐시가 그대로라 <b>돌아오는 비용 0</b>.</li>
-      <li>상위 모델로 아예 넘어갈 거면 <b>압축 후 전환</b>. 이어가기는 전체를 두 번(갈 때, 돌아올 때) 다시 쓰니 마지막 수단.</li>
-    </ol>
-    <h3>비용 사다리 <em>가는 비용 + 돌아오는 비용</em></h3>
-    <table><tr><th>방식</th><th>갈 때</th><th>돌아올 때</th><th>합계</th><th>맥락</th><th></th></tr>${rows}</table>
-    <div class="sub" style="margin-top:8px">돌아올 때 = ${m.label} 작업 후 다시 ${short(s.model)}로 오며 그 컨텍스트를 ${short(s.model)} 캐시에 쓰는 비용. 8월 데이터에서 fable→sonnet 복귀 22번이 이 항목이었음.</div>
-    ${calNote()}
-  </div>`;
-  $('#modal').hidden = false;
 }
 function breakTable(br) {
   if (!br.length) return '<div class="sub">없음</div>';
