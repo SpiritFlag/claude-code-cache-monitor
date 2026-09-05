@@ -100,11 +100,8 @@
   .fuel-row .fv .amt { width:58px; text-align:right; font: 600 12px var(--mono); }
   .fuel-row .fv .pm { width:62px; text-align:right; font: 11px var(--mono); font-weight:400; color:var(--dim); }
   .fuel-row .fv .fd { width:56px; text-align:right; font: 11px var(--mono); font-weight:400; color:var(--dim); }
-  .stack { display:flex; height:22px; border-radius:6px; overflow:hidden; background:#232836; }
-  .stack i { display:block; height:100%; min-width:1px; }
   .legend { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px; font-size:12px; color:var(--dim); }
   .legend .li b { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
-  .legend .li em { font: 11px var(--mono); color:var(--fg); font-style:normal; margin-left:4px; }
   table.tools td:nth-child(3) { width:40%; } .tb { height:8px; background:#232836; border-radius:4px; overflow:hidden; } .tb i { display:block; height:100%; background:#ff9f43; }
   .advice { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
   .advice b { color:var(--ok); font-family:var(--mono); } .advice.dim { color:var(--dim); font-size:12px; }
@@ -320,7 +317,6 @@ function renderMain() {
       <div class="card">${charCard(s)}</div>
     </div>
     <div class="card"><h2>Context over time (x축 = 활성시간 누적 · 유휴 잘라냄 — 톱니 = 캐시 재작성, 절벽 = 압축)</h2><div class="chartbox"><canvas id="chart"></canvas><div class="tip" id="charttip" hidden></div></div><div class="legend" id="legend"></div></div>
-    <div class="card"><h2>Context composition (추정 · 문자수 비율을 실제 컨텍스트에 맞춰 보정)</h2>${compBar(s)}</div>
     <div class="card"><h2>Cache breaks (최근)</h2>${breakTable(d.breaks)}</div>
     <div class="card strip"><h2>State</h2>
       <div class="chips">
@@ -393,16 +389,6 @@ const SYS_SRC = {
   'warm-key': '실측(웜)', 'warm-project': '실측(웜)', 'warm-folder': '실측(웜)',
   'default': '추정',
 };
-function compBar(s) {
-  const c = s.comp; if (!c) return '<div class="sub">데이터 없음</div>';
-  const total = COMP.reduce((n, [k]) => n + (c[k] || 0), 0) || 1;
-  const segs = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<i style="width:${100*c[k]/total}%;background:${col}" title="${label} ${fmtTok(c[k])}"></i>`).join('');
-  const items = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => {
-    const lbl = k === 'sys' ? `${label} · ${SYS_SRC[s.sysSource] || '추정'}` : label;
-    return `<span class="li"><b style="background:${col}"></b>${lbl} <em>${fmtTok(c[k])} · ${Math.round(100*c[k]/total)}%</em></span>`;
-  }).join('');
-  return `<div class="stack">${segs}</div><div class="legend">${items}</div>`;
-}
 // 원인 색의 단일 출처 (D-8 · D-9). free: 손실로 세지 않는 원인(server.js FREE_CAUSES와 같은 집합)
 const CAUSE_GROUPS = [
   { key: 'ttl',     label: '60분 넘기기',        color: '#ff5c5c', causes: ['ttl_expiry'] },
