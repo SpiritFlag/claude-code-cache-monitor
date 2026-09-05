@@ -261,11 +261,20 @@ const COMP = [
   ['toolInput', '툴 호출 입력', '#9ad0ff'], ['toolResult', '툴 결과', '#ff9f43'], ['reminders', '시스템 리마인더/훅', '#b58cff'],
   ['summary', '압축 요약', '#ffc857'], ['images', '이미지', '#ff5c5c'],
 ];
+// D-6. sysSource 8단계를 화면 문구 두 갈래로 압축: 실측(콜드) · 실측(웜) · 추정
+const SYS_SRC = {
+  'cold-self': '실측(콜드)', 'cold-key': '실측(콜드)', 'cold-project': '실측(콜드)', 'cold-folder': '실측(콜드)',
+  'warm-key': '실측(웜)', 'warm-project': '실측(웜)', 'warm-folder': '실측(웜)',
+  'default': '추정',
+};
 function compBar(s) {
   const c = s.comp; if (!c) return '<div class="sub">데이터 없음</div>';
   const total = COMP.reduce((n, [k]) => n + (c[k] || 0), 0) || 1;
   const segs = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<i style="width:${100*c[k]/total}%;background:${col}" title="${label} ${fmtTok(c[k])}"></i>`).join('');
-  const items = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<span class="li"><b style="background:${col}"></b>${label} <em>${fmtTok(c[k])} · ${Math.round(100*c[k]/total)}%</em></span>`).join('');
+  const items = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => {
+    const lbl = k === 'sys' ? `${label} · ${SYS_SRC[s.sysSource] || '추정'}` : label;
+    return `<span class="li"><b style="background:${col}"></b>${lbl} <em>${fmtTok(c[k])} · ${Math.round(100*c[k]/total)}%</em></span>`;
+  }).join('');
   return `<div class="stack">${segs}</div><div class="legend">${items}</div>`;
 }
 const HABITS = [
@@ -394,7 +403,7 @@ function tick() {
     sub.textContent = ago(-left) + ' 전 만료';
     const ok = s.ctx < s.continueThreshold;
     warn.innerHTML = `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
-      <div class="sub" style="margin-top:6px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, 이 폴더 실측) · 지금 ${fmtTok(s.ctx)} · 이어가면 ${usd(s.riskUsd)} 재작성</div>`;
+      <div class="sub" style="margin-top:6px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, ${SYS_SRC[s.sysSource] || '추정'}) · 지금 ${fmtTok(s.ctx)} · 이어가면 ${usd(s.riskUsd)} 재작성</div>`;
   }
   document.querySelectorAll('.ago').forEach(a => a.textContent = ago(now - +a.dataset.ts));
 }

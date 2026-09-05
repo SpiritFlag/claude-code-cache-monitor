@@ -1,0 +1,3 @@
+{"type":"attachment","sessionId":"s-mcp-cold","uuid":"u-cold-1","timestamp":"2026-09-01T00:00:00.000Z","attachment":{"type":"mcp_instructions_delta","addedNames":["claude.ai Figma"]}}
+{"type":"attachment","sessionId":"s-mcp-cold","uuid":"u-cold-2","timestamp":"2026-09-01T00:00:01.000Z","attachment":{"type":"deferred_tools_delta","addedNames":["mcp__github__search_issues"]}}
+{"type":"assistant","sessionId":"s-mcp-cold","uuid":"u-cold-3","timestamp":"2026-09-01T00:00:02.000Z","effort":"high","message":{"id":"m1","model":"claude-sonnet-5","usage":{"input_tokens":5,"cache_creation_input_tokens":39995,"cache_read_input_tokens":0,"output_tokens":50},"content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}}
