@@ -114,6 +114,10 @@
   th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
   th { color:var(--dim); font-weight:500; }
   .legend .li b.dash { width:3px; height:11px; border-radius:0; }
+  .legend .li b.dot { width:9px; height:9px; border-radius:50%; }
+  .chartbox { position:relative; }
+  .chartbox .tip { position:absolute; transform:translate(-50%,-130%); background:#232836; border:1px solid var(--line);
+    border-radius:6px; padding:3px 7px; font: 11px var(--mono); color:var(--fg); pointer-events:none; white-space:nowrap; }
   .empty { color:var(--dim); padding:40px; text-align:center; }
   .warnbox { border-left:3px solid var(--bad); background:#2a1a1a; padding:10px 12px; border-radius:6px; font-size:13px; }
   .okbox { border-left:3px solid var(--ok); background:#172a1f; padding:10px 12px; border-radius:6px; font-size:13px; }
@@ -301,7 +305,7 @@ function renderMain() {
       </div>
       <div class="card">${charCard(s)}</div>
     </div>
-    <div class="card"><h2>Context over time (x축 = 활성시간 누적 · 유휴 잘라냄 — 톱니 = 캐시 재작성, 절벽 = 압축)</h2><canvas id="chart"></canvas><div class="legend" id="legend"></div></div>
+    <div class="card"><h2>Context over time (x축 = 활성시간 누적 · 유휴 잘라냄 — 톱니 = 캐시 재작성, 절벽 = 압축)</h2><div class="chartbox"><canvas id="chart"></canvas><div class="tip" id="charttip" hidden></div></div><div class="legend" id="legend"></div></div>
     <div class="card"><h2>Context composition (추정 · 문자수 비율을 실제 컨텍스트에 맞춰 보정)</h2>${compBar(s)}</div>
     <div class="card"><h2>Cache breaks (최근)</h2>${breakTable(d.breaks)}</div>
     <div class="card strip"><h2>State</h2>
@@ -312,6 +316,16 @@ function renderMain() {
         <span class="chip"><b>span</b>${new Date(s.firstTs).toLocaleString()} → ${new Date(s.lastTs).toLocaleString()}</span>
       </div>
     </div>`;
+  const cv = $('#chart');
+  cv.onmousemove = e => {
+    const rect = cv.getBoundingClientRect(); const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    let best = null, bestDx = Infinity;
+    for (const p of chartMarks.prompts) { const dx = Math.abs(mx - p.x), dy = Math.abs(my - p.y); if (dx <= HIT_PX && dy <= 12 && dx < bestDx) { bestDx = dx; best = p; } }
+    const tip = $('#charttip'); if (!tip) return;
+    if (best) { tip.textContent = fmtMin(best.t); tip.style.left = best.x + 'px'; tip.style.top = best.y + 'px'; tip.hidden = false; }
+    else tip.hidden = true;
+  };
+  cv.onmouseleave = () => { const tip = $('#charttip'); if (tip) tip.hidden = true; };
   drawChart(d.series, d.breaks, d.prompts);
   tick();
 }
@@ -321,6 +335,12 @@ const COMP = [
   ['toolInput', '툴 호출 입력', '#9ad0ff'], ['toolResult', '툴 결과', '#ff9f43'], ['reminders', '시스템 리마인더/훅', '#b58cff'],
   ['summary', '압축 요약', '#ffc857'], ['images', '이미지', '#ff5c5c'],
 ];
+// 그래프 상수와 상태 (D-12)
+const PROMPT_COLOR = '#e6e9f0';      // 구성 8색·원인 8색 어디와도 겹치지 않는 중립색
+const HIT_PX = 8;                    // 프롬프트 툴팁 히트 반경 (R-5: 가장 가까운 점 하나)
+let chartMarks = { prompts: [] };    // drawChart가 남기는 [{x, y, t}]
+const fmtMin = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };  // FR-9의 yyyy-mm-dd hh:mm
 // D-6. sysSource 8단계를 화면 문구 두 갈래로 압축: 실측(콜드) · 실측(웜) · 추정
 const SYS_SRC = {
   'cold-self': '실측(콜드)', 'cold-key': '실측(콜드)', 'cold-project': '실측(콜드)', 'cold-folder': '실측(콜드)',
@@ -423,8 +443,6 @@ function drawChart(series, breaks, prompts) {
   const CX = a => Math.max(L, Math.min(W - R, X(a))); // 축 밖 클램프 (D-7)
   ctx.strokeStyle = '#262b36'; ctx.fillStyle = '#8b93a7'; ctx.font = '11px monospace';
   for (let i = 0; i <= 4; i++) { const v = maxY*i/4, y = Y(v); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W-R, y); ctx.stroke(); ctx.fillText(fmtTok(v), 4, y+4); }
-  ctx.fillText(new Date(series[0].t).toLocaleTimeString(), X(series[0].a), H-6);
-  const lab = new Date(series[series.length-1].t).toLocaleTimeString(); ctx.fillText(lab, W-R-ctx.measureText(lab).width, H-6);
   const col = { 'claude-sonnet-5':'#6ea8fe', 'claude-opus-5':'#3ddc84', 'claude-fable-5':'#ff9f43', 'claude-fable-5-1':'#ff9f43', 'claude-haiku-4-5-20251001':'#b58cff' };
   // stacked composition areas (sys, user, assistant, toolInput, toolResult, reminders, summary, images)
   const hasComp = series.some(p => p.c);
@@ -449,13 +467,22 @@ function drawChart(series, breaks, prompts) {
   ctx.lineWidth = 1.5;
   for (let i = 1; i < pts.length; i++) { const a = pts[i-1], b = pts[i]; ctx.strokeStyle = col[b.m] || '#ccc'; ctx.beginPath(); ctx.moveTo(X(a.a), Y(a.ctx)); ctx.lineTo(X(b.a), Y(b.ctx)); ctx.stroke(); }
   for (const b of breaks) if (!b.sub) { ctx.strokeStyle = causeColor(b.cause); ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(CX(b.a), T); ctx.lineTo(CX(b.a), H-B); ctx.stroke(); ctx.setLineDash([]); }
-  // 범례: 구성 8층(hasComp일 때만) -> 이 세션 breaks에 실제로 나온 원인 묶음(.dash, D-10)
+  // 프롬프트 마커 (D-12 · D-14): 히트 테스트가 쓸 좌표를 그린 쪽이 남긴다
+  chartMarks = { prompts: [] };
+  for (const p of (prompts || [])) {
+    const x = CX(p.a), y = Y(0);
+    ctx.fillStyle = PROMPT_COLOR; ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = '#0f1115'; ctx.stroke();
+    chartMarks.prompts.push({ x, y, t: p.t });
+  }
+  // 범례: 구성 8층(hasComp일 때만) -> 이 세션 breaks에 실제로 나온 원인 묶음(.dash, D-10) -> 프롬프트 마커(.dot)
   const seenGroups = []; const seenKeys = new Set();
   for (const b of breaks) if (!b.sub) { const g = causeGroup(b.cause); if (!seenKeys.has(g.key)) { seenKeys.add(g.key); seenGroups.push(g); } }
   const lg = $('#legend');
   if (lg) lg.innerHTML =
     (hasComp ? COMP.map(([k, label, c]) => `<span class="li"><b style="background:${c}"></b>${label}</span>`).join('') : '') +
-    seenGroups.map(g => `<span class="li"><b class="dash" style="background:${g.color}"></b>${g.label}</span>`).join('');
+    seenGroups.map(g => `<span class="li"><b class="dash" style="background:${g.color}"></b>${g.label}</span>`).join('') +
+    ((prompts && prompts.length) ? `<span class="li"><b class="dot" style="background:${PROMPT_COLOR}"></b>내 프롬프트(입력 시점)</span>` : '');
 }
 
 function resumeBox(s) {
