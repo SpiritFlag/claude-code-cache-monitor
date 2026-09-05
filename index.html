@@ -301,7 +301,7 @@ function renderMain() {
       </div>
       <div class="card">${charCard(s)}</div>
     </div>
-    <div class="card"><h2>Context over time (톱니 = 캐시 재작성, 절벽 = 압축)</h2><canvas id="chart"></canvas><div class="legend" id="legend"></div></div>
+    <div class="card"><h2>Context over time (x축 = 활성시간 누적 · 유휴 잘라냄 — 톱니 = 캐시 재작성, 절벽 = 압축)</h2><canvas id="chart"></canvas><div class="legend" id="legend"></div></div>
     <div class="card"><h2>Context composition (추정 · 문자수 비율을 실제 컨텍스트에 맞춰 보정)</h2>${compBar(s)}</div>
     <div class="card"><h2>Cache breaks (최근)</h2>${breakTable(d.breaks)}</div>
     <div class="card strip"><h2>State</h2>
@@ -312,7 +312,7 @@ function renderMain() {
         <span class="chip"><b>span</b>${new Date(s.firstTs).toLocaleString()} → ${new Date(s.lastTs).toLocaleString()}</span>
       </div>
     </div>`;
-  drawChart(d.series, d.breaks);
+  drawChart(d.series, d.breaks, d.prompts);
   tick();
 }
 
@@ -405,38 +405,46 @@ function breakTable(br) {
     br.slice().reverse().map(b => `<tr><td>${new Date(b.ts).toLocaleString()}</td><td class="c-${b.cause}">${b.cause}${b.sub?' (sub)':''}</td><td>${b.cause==='model_switch'?short(b.from)+'→'+short(b.model):b.cause==='effort_change'?b.effort:short(b.model)}</td><td>${fmtTok(b.ctx)}</td><td>${fmtTok(b.rewrite)}</td><td>${usd(b.extra)}</td></tr>`).join('') + '</table>';
 }
 
-function drawChart(series, breaks) {
+function drawChart(series, breaks, prompts) {
   const c = $('#chart'); if (!c || !series.length) return; const ctx = c.getContext('2d');
   const dpr = window.devicePixelRatio || 1; const W = c.clientWidth || 1200, H = 260, L = 60, R = 10, T = 10, B = 24;
   c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0,0,W,H);
-  const t0 = series[0].t, t1 = series[series.length-1].t || t0+1; const maxY = 1e6;
-  const X = t => L + (W-L-R) * (t - t0) / Math.max(1, t1 - t0), Y = v => T + (H-T-B) * (1 - v/maxY);
+  const a1 = series[series.length-1].a; const maxY = 1e6;
+  const X = a => L + (W-L-R) * a / Math.max(1, a1), Y = v => T + (H-T-B) * (1 - v/maxY);
+  const CX = a => Math.max(L, Math.min(W - R, X(a))); // 축 밖 클램프 (D-7)
   ctx.strokeStyle = '#262b36'; ctx.fillStyle = '#8b93a7'; ctx.font = '11px monospace';
   for (let i = 0; i <= 4; i++) { const v = maxY*i/4, y = Y(v); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W-R, y); ctx.stroke(); ctx.fillText(fmtTok(v), 4, y+4); }
-  ctx.fillText(new Date(t0).toLocaleTimeString(), L, H-6); const lab = new Date(t1).toLocaleTimeString(); ctx.fillText(lab, W-R-ctx.measureText(lab).width, H-6);
+  ctx.fillText(new Date(series[0].t).toLocaleTimeString(), X(series[0].a), H-6);
+  const lab = new Date(series[series.length-1].t).toLocaleTimeString(); ctx.fillText(lab, W-R-ctx.measureText(lab).width, H-6);
   const col = { 'claude-sonnet-5':'#6ea8fe', 'claude-opus-5':'#3ddc84', 'claude-fable-5':'#ff9f43', 'claude-fable-5-1':'#ff9f43', 'claude-haiku-4-5-20251001':'#b58cff' };
   // stacked composition areas (sys, user, assistant, toolInput, toolResult, reminders, summary, images)
   const hasComp = series.some(p => p.c);
+  // 축 왼쪽 빈 구간을 메우는 선두 점 (D-16). 스택·선·채우기만 이 배열로 그리고,
+  // 브레이크 점선 · 프롬프트 점 · 범례 · 양 끝 라벨은 원래 series를 쓴다.
+  const sys0 = (series[0].c || [])[0] || 0;
+  const pts = (hasComp && series[0].a > 0)
+    ? [{ a: 0, t: series[0].t, ctx: sys0, cw: 0, cr: 0, m: series[0].m, c: COMP.map((_, k) => k ? 0 : sys0) }].concat(series)
+    : series;
   if (hasComp) {
     for (let k = 0; k < COMP.length; k++) {
       ctx.fillStyle = COMP[k][2] + 'aa'; ctx.beginPath();
       const base = p => (p.c || []).slice(0, k).reduce((n, v) => n + v, 0), top = p => base(p) + ((p.c || [])[k] || 0);
-      series.forEach((p, i) => { const x = X(p.t), y = Y(top(p)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      for (let i = series.length - 1; i >= 0; i--) ctx.lineTo(X(series[i].t), Y(base(series[i])));
+      pts.forEach((p, i) => { const x = X(p.a), y = Y(top(p)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      for (let i = pts.length - 1; i >= 0; i--) ctx.lineTo(X(pts[i].a), Y(base(pts[i])));
       ctx.closePath(); ctx.fill();
     }
     const lg = $('#legend'); if (lg) lg.innerHTML = COMP.map(([k, label, c]) => `<span class="li"><b style="background:${c}"></b>${label}</span>`).join('');
   } else {
     const y0 = Y(0);
-    for (let i = 1; i < series.length; i++) { const a = series[i-1], b = series[i]; ctx.fillStyle = (col[b.m] || '#ccc') + '22'; ctx.beginPath(); ctx.moveTo(X(a.t), y0); ctx.lineTo(X(a.t), Y(a.ctx)); ctx.lineTo(X(b.t), Y(b.ctx)); ctx.lineTo(X(b.t), y0); ctx.closePath(); ctx.fill(); }
+    for (let i = 1; i < pts.length; i++) { const a = pts[i-1], b = pts[i]; ctx.fillStyle = (col[b.m] || '#ccc') + '22'; ctx.beginPath(); ctx.moveTo(X(a.a), y0); ctx.lineTo(X(a.a), Y(a.ctx)); ctx.lineTo(X(b.a), Y(b.ctx)); ctx.lineTo(X(b.a), y0); ctx.closePath(); ctx.fill(); }
   }
   ctx.lineWidth = 1.5;
-  for (let i = 1; i < series.length; i++) { const a = series[i-1], b = series[i]; ctx.strokeStyle = col[b.m] || '#ccc'; ctx.beginPath(); ctx.moveTo(X(a.t), Y(a.ctx)); ctx.lineTo(X(b.t), Y(b.ctx)); ctx.stroke(); }
+  for (let i = 1; i < pts.length; i++) { const a = pts[i-1], b = pts[i]; ctx.strokeStyle = col[b.m] || '#ccc'; ctx.beginPath(); ctx.moveTo(X(a.a), Y(a.ctx)); ctx.lineTo(X(b.a), Y(b.ctx)); ctx.stroke(); }
   // rewrite markers: cache write large relative to ctx
-  for (const p of series) if (p.cw > 20000 && p.cw > p.ctx*0.3) { ctx.fillStyle = 'rgba(255,92,92,.85)'; ctx.beginPath(); ctx.arc(X(p.t), Y(p.ctx), 3.5, 0, Math.PI*2); ctx.fill(); }
+  for (const p of series) if (p.cw > 20000 && p.cw > p.ctx*0.3) { ctx.fillStyle = 'rgba(255,92,92,.85)'; ctx.beginPath(); ctx.arc(X(p.a), Y(p.ctx), 3.5, 0, Math.PI*2); ctx.fill(); }
   const bc = { model_switch:'#ff9f43', effort_change:'#ff5c5c', compact:'#6ea8fe', ttl_expiry:'#ffc857' };
-  for (const b of breaks) if (!b.sub) { ctx.strokeStyle = bc[b.cause] || '#b58cff'; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(X(b.ts), T); ctx.lineTo(X(b.ts), H-B); ctx.stroke(); ctx.setLineDash([]); }
+  for (const b of breaks) if (!b.sub) { ctx.strokeStyle = bc[b.cause] || '#b58cff'; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(CX(b.a), T); ctx.lineTo(CX(b.a), H-B); ctx.stroke(); ctx.setLineDash([]); }
 }
 
 function resumeBox(s) {
@@ -471,10 +479,10 @@ $('#navbtn').onclick = () => {
   const on = !$('#app').classList.contains('nav-collapsed');
   applyNav(on);
   try { localStorage.setItem(NAVKEY, on ? '1' : '0'); } catch (e) { }
-  requestAnimationFrame(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks); }); // the canvas got wider or narrower
+  requestAnimationFrame(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks, d.prompts); }); // the canvas got wider or narrower
 };
 try { applyNav(localStorage.getItem(NAVKEY) === '1'); } catch (e) { }
-let rsz = null; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks); }, 100); });
+let rsz = null; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks, d.prompts); }, 100); });
 </script>
 </body>
 </html>
