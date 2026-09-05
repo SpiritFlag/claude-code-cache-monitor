@@ -61,6 +61,7 @@ function session(id) {
       ctx: 0, ttlMin: 5, calls: 0, subCalls: 0, out: 0, think: 0, cacheRead: 0, cacheWrite: 0, cost: 0,
       prompts: 0, compacts: 0, asks: 0, series: [], breaks: [], breakCost: 0, subActive: 0,
       tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {},
+      activeMs: 0, days: {},
       sysTokens: 0, sysSet: false, comp: null, toolTop: [], compScale: 0,
       coldStartCw: 0, warmStartTotal: 0, firstTotal: 0, startRegrowth: null, compactions: [], compactSamples: [], byCause: {},
       projKey: '', cfgKey: '', sysSource: 'default',
@@ -206,6 +207,51 @@ function callCost(model, t) {
   return (t.in * p.in + t.cw1h * p.in * 2 + t.cw5m * p.in * 1.25 + (t.cw - t.cw1h - t.cw5m) * p.in * 1.25 + t.cr * p.in * p.read + t.out * p.out) / 1e6;
 }
 
+// KST 05:00 일 경계. KST(+9)에서 05시를 빼면 UTC 자정이 된다.
+const DAY_SHIFT = 4 * 3600e3;
+const dayKey = ts => new Date(ts + DAY_SHIFT).toISOString().slice(0, 10);
+
+function addDay(s, ts, ms, cost) {
+  const k = dayKey(ts);
+  const b = s.days[k] || (s.days[k] = { activeMs: 0, cost: 0 });
+  b.activeMs += ms; b.cost += cost;
+}
+
+// 열린 그룹을 확정한다. 중간에 끊겨도 다음 그룹의 prevTs가 여기 lastTs가 되어 합이 보존된다.
+function flushGroup(f) {
+  const g = f.grp; if (!g) return;
+  f.grp = null; f.actPrevTs = g.lastTs;
+  const s = sessions.get(f.sessionId); if (!s) return;
+  const ms = Math.max(0, g.lastTs - g.prevTs);
+  s.activeMs += ms; addDay(s, g.lastTs, ms, g.cost);
+}
+
+// handleRecord에서 부른다. 활성시간에서 사이드체인을 제외한다(D-7).
+function trackActive(f, d, ts) {
+  if (f.isSub || d.isSidechain === true) return;
+  if (!ts) return;                          // 시각 없는 top-level 이벤트는 영향이 없다 (SC-8)
+  const m = d.message;
+  const real = d.type === 'assistant' && m && m.usage && m.model !== '<synthetic>';
+  if (!real) { flushGroup(f); f.actPrevTs = ts; return; }
+  const id = d.requestId || m.id;           // 아카이브에서 requestId 결측은 <synthetic>뿐이다
+  if (f.grp && f.grp.id === id) { f.grp.lastTs = ts; return; }
+  flushGroup(f);
+  f.grp = { id, prevTs: f.actPrevTs || ts, lastTs: ts, cost: 0 };
+}
+
+// 폴더 전체 합계. sessions 맵 전체를 돈다(D-9).
+function folderTotals() {
+  const days = {}; let activeMs = 0, cost = 0;
+  for (const s of sessions.values()) {
+    activeMs += s.activeMs;
+    for (const k of Object.keys(s.days)) {
+      const b = s.days[k], t = days[k] || (days[k] = { activeMs: 0, cost: 0 });
+      t.activeMs += b.activeMs; t.cost += b.cost; cost += b.cost;
+    }
+  }
+  return { activeMs, cost, days };
+}
+
 function handleRecord(f, d) {
   // 재기록 구간: CC가 재개하며 이력을 다시 쓴 행은 uuid가 같다. 종류 불문 한 번만 센다.
   if (d.uuid) { if (f.uuidSeen.has(d.uuid)) return; f.uuidSeen.add(d.uuid); }
@@ -214,6 +260,7 @@ function handleRecord(f, d) {
   const s = session(f.sessionId);
   const ts = d.timestamp ? Date.parse(d.timestamp) : 0;
   if (ts) { if (!s.firstTs || ts < s.firstTs) s.firstTs = ts; if (ts > s.lastTs) s.lastTs = ts; }
+  trackActive(f, d, ts);
 
   switch (d.type) {
     case 'custom-title': s.title = d.customTitle; return;
@@ -274,7 +321,8 @@ function handleRecord(f, d) {
       if (f.seen.has(m.id)) return; f.seen.add(m.id);
       const t = tokensOf(m.usage); const total = t.in + t.cw + t.cr;
       const cost = callCost(m.model, t);
-      s.cost += cost; s.out += t.out; s.think += t.think; s.cacheRead += t.cr; s.cacheWrite += t.cw;
+      s.cost += cost; if (f.grp) f.grp.cost += cost; else addDay(s, ts, 0, cost);
+      s.out += t.out; s.think += t.think; s.cacheRead += t.cr; s.cacheWrite += t.cw;
       s.tok.in += t.in; s.tok.cw1h += t.cw1h; s.tok.cw5m += t.cw5m; s.tok.cwOther += Math.max(0, t.cw - t.cw1h - t.cw5m); s.tok.cr += t.cr; s.tok.out += t.out;
       s.modelCalls[m.model] = (s.modelCalls[m.model] || 0) + 1;
       { const pp = price(m.model); s.saved += t.cr * pp.in * (1 - pp.read) / 1e6; } // what caching saved vs. paying list price for those tokens
@@ -343,9 +391,9 @@ function handleRecord(f, d) {
 
 function readFile(fp) {
   let f = files.get(fp);
-  if (!f) { f = { fp, offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), uuidSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0, cfgNames: new Set(), cfgFrozen: false, compactPost: null }; files.set(fp, f); }
+  if (!f) { f = { fp, offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), uuidSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0, cfgNames: new Set(), cfgFrozen: false, compactPost: null, grp: null, actPrevTs: 0 }; files.set(fp, f); }
   let st; try { st = fs.statSync(fp); } catch { return; }
-  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.uuidSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; f.cfgNames = new Set(); f.cfgFrozen = false; f.compactPost = null; } // truncated/rewritten
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.uuidSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; f.cfgNames = new Set(); f.cfgFrozen = false; f.compactPost = null; f.grp = null; f.actPrevTs = 0; } // truncated/rewritten
   if (st.size === f.offset) return;
   const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
   fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
@@ -375,6 +423,7 @@ function charState(s, now) {
 
 // ---------------- snapshot ----------------
 function snapshot() {
+  for (const f of files.values()) flushGroup(f);
   const now = Date.now();
   const list = [...sessions.values()].filter(s => s.calls > 0).sort((a, b) => b.lastTs - a.lastTs).map(s => {
     const p = price(s.model);
@@ -388,14 +437,14 @@ function snapshot() {
     ctx: s.ctx, ttlMin: s.ttlMin, calls: s.calls, subCalls: s.subCalls, out: s.out, think: s.think, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite,
     cost: s.cost, prompts: s.prompts, compacts: s.compacts, asks: s.asks, breakCost: s.breakCost,
     riskUsd, freshCost, costDelta: riskUsd - freshCost,
-    tok: s.tok,
+    tok: s.tok, activeMs: s.activeMs,
     comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, sysTokens: s.sysTokens, sysSource: s.sysSource, cfgKey: s.cfgKey, projKey: s.projKey, byCause: s.byCause,
     continueThreshold,
     saved: s.saved, commits: s.commits, lateCalls: s.lateCalls, nightCalls: s.nightCalls, streak: s.streak, bestStreak: s.bestStreak,
     charState: charState(s, now), // after TTL expiry: continuing beats a new session iff ctx < system floor + regrowth (price/horizon independent)
     busy: s.lastStop === 'tool_use' && now - s.lastTs < 3 * 60e3, subActive: now - s.subActive < 3 * 60e3,
   };});
-  return { version, root: ROOT, now, calibration: CAL, sessions: list };
+  return { version, root: ROOT, now, calibration: CAL, folder: folderTotals(), sessions: list };
 }
 function detail(id) {
   const s = sessions.get(id); if (!s) return null;
