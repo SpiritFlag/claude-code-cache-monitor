@@ -76,6 +76,19 @@
   .ring .num .big { font-size:40px; }
   .bar { height:10px; background:#232836; border-radius:5px; overflow:hidden; margin-top:10px; }
   .bar i { display:block; height:100%; background:var(--acc); }
+  /* 상단 Context 바: 굵기 10px · 모서리 5px는 .bar와 같은 값이고, 안이 여덟 층으로 나뉜다 (D-1) */
+  .ctxbar { display:flex; height:10px; background:#232836; border-radius:5px; overflow:hidden; margin-top:10px; box-shadow:inset 0 1px 0 #0f1115, inset 0 -1px 0 #0f1115; }
+  .ctxbar i { display:block; height:100%; }
+  .ctx-head { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:4px 14px; }
+  .ctx-head .sub { margin-top:0; }
+  .complegend { margin-top:8px; display:flex; flex-direction:column; gap:3px; }
+  .cl-row { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim); }
+  .cl-row b { flex:none; width:10px; height:10px; border-radius:2px; }
+  .cl-row .cl-lb { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cl-row .cl-tk { flex:none; width:52px; text-align:right; font:11px var(--mono); font-style:normal; color:var(--fg); }
+  .cl-row .cl-pc { flex:none; width:38px; text-align:right; font:11px var(--mono); font-style:normal; }
+  .cl-row.zero, .cl-row.zero .cl-tk { color:#4a5160; }
+  .cl-note { margin-top:6px; font-size:11px; color:var(--dim); }
   /* 연비 3줄: 세로로 쌓인 가로 트랙 위에 값 위치를 원으로 찍는다($0~100/h 척도) */
   .fuel { display:flex; flex-direction:column; gap:8px; margin-top:12px; border-top:1px solid var(--line); padding-top:10px; }
   .fuel .fuel-h { font-size:11px; color:var(--dim); font-weight:600; letter-spacing:.04em; text-transform:uppercase; margin-bottom:2px; }
@@ -279,12 +292,12 @@ function renderMain() {
         <div class="num"><div class="big" id="ttl">--:--</div><div class="sub" id="ttlsub"></div></div></div>
         <div id="ttlwarn" style="margin-top:12px"></div>
       </div>
-      <div class="card"><h2>Context</h2><div class="big">${fmtTok(s.ctx)}</div>
-        <div class="bar"><i style="width:${Math.min(100, s.ctx/1e6*100)}%"></i></div>
-        <div class="sub">of 1M window · cacheR ${fmtTok(s.cacheRead)} · cacheW ${fmtTok(s.cacheWrite)} · compacts ${s.compacts}</div>
+      <div class="card"><h2>Context</h2>
+        <div class="ctx-head"><div class="big">${fmtTok(s.ctx)}</div><div class="sub">of 1M window · cacheR ${fmtTok(s.cacheRead)} · cacheW ${fmtTok(s.cacheWrite)} · compacts ${s.compacts}</div></div>
+        ${ctxNote(s)}
+        <div class="ctxbar">${ctxBarSegs(s)}</div>
+        ${ctxLegend(s)}
         ${adviceLine(s)}
-        ${principleLine()}
-        ${(s.ctx > s.continueThreshold && (Date.now() + clockSkew) < s.lastCallStart + s.ttlMin * 60e3) ? `<div class="sub" style="margin-top:10px;color:var(--warn)">캐시 만료 후 이 세션을 꼭 이어가야 한다면 compact를 미리 해주세요</div>` : ''}
       </div>
       <div class="card cost-card"><h2>Cost (API 환산)</h2>
         <div class="cost-mid"><div class="cost-head">
@@ -301,6 +314,7 @@ function renderMain() {
             <div class="sub" style="margin-top:8px">캐시 깨짐 손실 <b style="color:var(--bad)">${usd(s.breakCost)}</b> (${d.breaks.length}건)</div>
           </div>
         </div></div>
+        ${principleLine()}
         ${fuelCells(s)}
       </div>
       <div class="card">${charCard(s)}</div>
@@ -336,6 +350,37 @@ const COMP = [
   ['toolInput', '툴 호출 입력', '#9ad0ff'], ['toolResult', '툴 결과', '#ff9f43'],
   ['reminders', '시스템 리마인더/훅', '#b58cff'], ['images', '이미지', '#ff5c5c'],
 ];
+// --- 상단 Context 바 (COMP 옆에 둔다)
+const CTX_WINDOW = 1e6;   // 바의 분모. 지금 인라인으로 쓰던 1e6을 이름으로 올린다
+
+// 여덟 층 <i>. comp가 없으면 지금과 같은 단색 한 층. (D-2 · D-9)
+// 반환: '.ctxbar'의 innerHTML
+function ctxBarSegs(s) {
+  const c = s.comp;
+  if (!c) return `<i style="flex:none;width:${Math.min(100, s.ctx / CTX_WINDOW * 100)}%;background:var(--acc)"></i>`;
+  return COMP.map(([k, label, col]) =>
+    `<i style="flex:none;width:${100 * (c[k] || 0) / CTX_WINDOW}%;background:${col}" title="${label} ${fmtTok(c[k] || 0)}"></i>`).join('');
+}
+
+// 여덟 항목 범례. comp가 없으면 빈 문자열. (D-5 · D-6)
+// 비율의 분모는 여덟 층의 합(≈ ctx)이지 CTX_WINDOW가 아니다.
+function ctxLegend(s) {
+  const c = s.comp; if (!c) return '';
+  const total = COMP.reduce((n, [k]) => n + (c[k] || 0), 0) || 1;
+  const rows = COMP.map(([k, label, col]) => {
+    const v = c[k] || 0;
+    const lbl = k === 'sys' ? `${label} · ${SYS_SRC[s.sysSource] || '추정'}` : label;
+    return `<div class="cl-row${v ? '' : ' zero'}"><b style="background:${col}"></b>`
+      + `<span class="cl-lb">${lbl}</span><em class="cl-tk">${fmtTok(v)}</em>`
+      + `<em class="cl-pc">${Math.round(100 * v / total)}%</em></div>`;
+  }).join('');
+  return `<div class="complegend">${rows}</div>`;
+}
+// 추정 단서 한 줄. comp가 없으면 빈 문자열. (D-8, do §2 #3 — head 줄 바로 아래로 배치)
+function ctxNote(s) {
+  return s.comp ? `<div class="cl-note">구성은 추정 — 문자수 비율을 실제 컨텍스트에 맞춰 보정</div>` : '';
+}
+
 // 그래프 상수와 상태 (D-12)
 const PROMPT_COLOR = '#e6e9f0';      // 구성 8색·원인 8색 어디와도 겹치지 않는 중립색
 const HIT_PX = 8;                    // 프롬프트 툴팁 히트 반경 (R-5: 가장 가까운 점 하나)
@@ -488,10 +533,9 @@ function drawChart(series, breaks, prompts) {
 
 function resumeBox(s) {
   // D-12. TTL 만료 후 갈림길 — 이어가기(riskUsd) vs 새 세션(freshCost), 차액(costDelta)이 방향을 정한다
+  // 질문 q2 답 반영: 판단문 한 줄만 남긴다 (비용 비교·임계값 설명 줄은 삭제)
   const ok = s.costDelta < 0; // 이어가기가 싸다
-  return `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
-    <div class="sub" style="margin-top:6px">이어가기 <b>${usd(s.riskUsd)}</b> · 새 세션 <b>${usd(s.freshCost)}</b> · 차액 <b style="color:${ok ? 'var(--ok)' : 'var(--warn)'}">${usd(Math.abs(s.costDelta))}</b> (${ok ? '이어가기가' : '새 세션이'} 쌈)</div>
-    <div class="sub" style="margin-top:4px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, ${SYS_SRC[s.sysSource] || '추정'}) · 지금 ${fmtTok(s.ctx)}</div>`;
+  return `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>`;
 }
 function tick() {
   if (!state) return; const s = state.sessions.find(x => x.id === selected); if (!s) return;
@@ -501,7 +545,9 @@ function tick() {
     const mm = Math.floor(left/60e3), ss = Math.floor(left%60e3/1000); el.textContent = `${mm}:${String(ss).padStart(2,'0')}`;
     const frac = left/ttlMs; arc.setAttribute('stroke-dashoffset', String(502.6*(1-frac))); arc.setAttribute('stroke', frac > .5 ? 'var(--ok)' : frac > .2 ? 'var(--warn)' : 'var(--bad)');
     sub.textContent = '마지막 호출 ' + ago(now - s.lastCallStart) + ' 전';
-    warn.innerHTML = `<div class="sub" style="font-size:13px">깨뜨리면 <b style="color:var(--warn);font-family:var(--mono)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(현재 cost의 ${s.cost ? Math.round(100 * s.riskUsd / s.cost) : 0}%)</span></div>` + (frac < .2 ? `<div class="warnbox" style="margin-top:8px">곧 만료. 지금 치면 캐시 히트</div>` : '');
+    warn.innerHTML = `<div class="sub" style="font-size:13px">깨뜨리면 <b style="color:var(--warn);font-family:var(--mono)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(현재 cost의 ${s.cost ? Math.round(100 * s.riskUsd / s.cost) : 0}%)</span></div>`
+      + (s.ctx > s.continueThreshold ? `<div class="sub" style="margin-top:8px;color:var(--warn)">캐시 만료 후 이 세션을 꼭 이어가야 한다면 compact를 미리 해주세요</div>` : '')
+      + (frac < .2 ? `<div class="warnbox" style="margin-top:8px">곧 만료. 지금 치면 캐시 히트</div>` : '');
   } else {
     el.textContent = '만료'; arc.setAttribute('stroke-dashoffset', '502.6'); arc.setAttribute('stroke', 'var(--bad)');
     sub.textContent = ago(-left) + ' 전 만료';
