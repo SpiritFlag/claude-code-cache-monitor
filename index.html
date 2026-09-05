@@ -104,7 +104,7 @@
   .warnbox { border-left:3px solid var(--bad); background:#2a1a1a; padding:10px 12px; border-radius:6px; font-size:13px; }
   .okbox { border-left:3px solid var(--ok); background:#172a1f; padding:10px 12px; border-radius:6px; font-size:13px; }
   /* narrow layouts: 4-up top row folds so Cost and the character drop to a second line.
-     On that second line they swap: the character fits the 280px column, Cost needs the wide one for its 3-up 연비 grid. */
+     On that second line they swap: the character fits the 280px column, Cost needs the wide one so the 연비 rows keep a readable track next to their fixed-width values. */
   @media (max-width: 1280px) {
     .top { grid-template-columns: 280px 1fr; }
     .top > :nth-child(3) { order: 2; } /* Cost -> right */
