@@ -71,9 +71,11 @@
   table.tools td:nth-child(3) { width:40%; } .tb { height:8px; background:#232836; border-radius:4px; overflow:hidden; } .tb i { display:block; height:100%; background:#ff9f43; }
   .advice { margin-top:12px; border-top:1px solid var(--line); padding-top:10px; display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:13px; }
   .advice b { color:var(--ok); font-family:var(--mono); } .advice.dim { color:var(--dim); font-size:12px; }
+  .advice.strong { border-top-color:var(--ok); } .advice.strong b { color:var(--ok); }
   .advice button, .mh button { background:#2a3140; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
   .advice button:hover, .mh button:hover { background:#354055; }
   .whatif.sw > div { cursor:pointer; } .whatif.sw > div:hover { background:#2a3140; }
+  .whatif > div.current { background:#1f2d24; border:1px solid var(--ok); } .whatif > div.current .wv { color:var(--ok); }
   .modal tr.best td { background:#1f2d24; } .modal tr.best td:first-child::after { content:' ✓'; color:var(--ok); }
   .modal[hidden] { display:none; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:10; }
@@ -121,14 +123,18 @@ const fmtTok = n => n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFix
 const usd = n => '$' + (n||0).toFixed(2);
 const short = m => (m||'').replace('claude-','').replace('-4-5-20251001','');
 const ago = ms => { if (ms < 60e3) return Math.floor(ms/1000)+'s'; if (ms < 3600e3) return Math.floor(ms/60e3)+'m'; if (ms < 86400e3) return (ms/3600e3).toFixed(1)+'h'; return (ms/86400e3).toFixed(1)+'d'; };
-const PRICE = { 'claude-fable-5-1':{in:10,out:50,read:0.025}, 'claude-fable-5':{in:10,out:50,read:0.1}, 'claude-opus-5':{in:5,out:25,read:0.1}, 'claude-sonnet-5':{in:2,out:10,read:0.1}, 'claude-haiku-4-5-20251001':{in:1,out:5,read:0.1} };
-const WHATIF = [['claude-fable-5-1','fable이었다면'], ['claude-opus-5','opus였다면'], ['claude-sonnet-5','sonnet이었다면'], ['claude-haiku-4-5-20251001','haiku였다면']];
-const family = m => (m||'').startsWith('claude-fable') ? 'claude-fable-5' : m;
-function costAs(tok, model) { const p = PRICE[model]; return (tok.in*p.in + tok.cw1h*p.in*2 + (tok.cw5m+tok.cwOther)*p.in*1.25 + tok.cr*p.in*p.read + tok.out*p.out) / 1e6; }
-function whatIf(s) {
-  if (!s.tok) return '';
-  const cur = family(s.model); // exclude the model the rest of the UI shows, not the most-used one
-  return `<div class="whatif">` + WHATIF.filter(([m]) => family(m) !== cur).map(([m, label]) => { const v = costAs(s.tok, m); const d = v - s.cost; return `<div title="${m}"><div class="wl">${label}</div><div class="wv">${usd(v)}</div><div class="wd" style="color:${d>0?'var(--bad)':'var(--ok)'}">${d>0?'+':''}${usd(d)}</div></div>`; }).join('') + `</div>`;
+// D-13(질문 q1로 개정) · D-14. 모델 비교 4칸은 서버가 계산해 내려준다(modelCompare) — "현재"는
+// family()로 묶어 판정해 마지막 실사용 모델 계열을 따라간다. 단가가 다르면 배수가 1.00×가 아닐 수
+// 있는데 그대로 보여준다(재미로 보는 추정치라 정밀도를 안 따진다)
+function modelCard(s) {
+  const mc = s.modelCompare; if (!mc || !mc.rows.length) return '';
+  const rows = mc.rows.map(r => `<div class="${r.current ? 'current' : ''}" title="${r.model}">
+      <div class="wl">${r.label}${r.current ? ' · 현재' : ''}</div>
+      <div class="wv">${usd(r.cost)}</div>
+      <div class="wd">${r.ratio == null ? '-' : r.ratio.toFixed(2) + '×'}</div>
+    </div>`).join('');
+  const breakdown = mc.mixed ? `<div class="sub" style="margin-top:8px">혼용 세션 실비: ${mc.breakdown.map(b => `${short(b.model)} ${usd(b.cost)} (${b.calls}회)`).join(' · ')}</div>` : '';
+  return `<div class="whatif" style="grid-template-columns:repeat(${mc.rows.length},1fr)">${rows}</div>${breakdown}<div class="sub" style="margin-top:6px;color:var(--dim)">재미로 보는 추정치 · 실제 과금과 다를 수 있음</div>`;
 }
 
 let state = null, selected = null, detailCache = {}, clockSkew = 0;
@@ -230,6 +236,7 @@ function renderMain() {
       <div class="card"><h2>Context</h2><div class="big">${fmtTok(s.ctx)}</div>
         <div class="bar"><i style="width:${Math.min(100, s.ctx/1e6*100)}%"></i></div>
         <div class="sub">of 1M window · cacheR ${fmtTok(s.cacheRead)} · cacheW ${fmtTok(s.cacheWrite)} · compacts ${s.compacts}</div>
+        ${riskLine(s)}
         ${adviceLine(s)}
         ${switchCells(s)}
         ${(s.ctx > s.continueThreshold && (Date.now() + clockSkew) < s.lastCallStart + s.ttlMin * 60e3) ? `<div class="sub" style="margin-top:10px;color:var(--warn)">캐시 만료 후 이 세션을 꼭 이어가야 한다면 compact를 미리 해주세요</div>` : ''}
@@ -237,7 +244,7 @@ function renderMain() {
       <div class="card"><h2>Cost (API 환산)</h2><div class="big">${usd(s.cost)}</div>
         <div class="sub">out ${fmtTok(s.out)} · think ${s.out?Math.round(100*s.think/s.out):0}% · calls ${s.calls}${s.subCalls?' +'+s.subCalls+' sub':''}</div>
         <div class="sub" style="margin-top:10px">캐시 깨짐 손실 <b style="color:var(--bad)">${usd(s.breakCost)}</b> (${d.breaks.length}건)</div>
-        ${whatIf(s)}
+        ${modelCard(s)}
       </div>
       <div class="card">${charCard(s)}</div>
     </div>
@@ -261,11 +268,20 @@ const COMP = [
   ['toolInput', '툴 호출 입력', '#9ad0ff'], ['toolResult', '툴 결과', '#ff9f43'], ['reminders', '시스템 리마인더/훅', '#b58cff'],
   ['summary', '압축 요약', '#ffc857'], ['images', '이미지', '#ff5c5c'],
 ];
+// D-6. sysSource 8단계를 화면 문구 두 갈래로 압축: 실측(콜드) · 실측(웜) · 추정
+const SYS_SRC = {
+  'cold-self': '실측(콜드)', 'cold-key': '실측(콜드)', 'cold-project': '실측(콜드)', 'cold-folder': '실측(콜드)',
+  'warm-key': '실측(웜)', 'warm-project': '실측(웜)', 'warm-folder': '실측(웜)',
+  'default': '추정',
+};
 function compBar(s) {
   const c = s.comp; if (!c) return '<div class="sub">데이터 없음</div>';
   const total = COMP.reduce((n, [k]) => n + (c[k] || 0), 0) || 1;
   const segs = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<i style="width:${100*c[k]/total}%;background:${col}" title="${label} ${fmtTok(c[k])}"></i>`).join('');
-  const items = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => `<span class="li"><b style="background:${col}"></b>${label} <em>${fmtTok(c[k])} · ${Math.round(100*c[k]/total)}%</em></span>`).join('');
+  const items = COMP.filter(([k]) => c[k] > 0).map(([k, label, col]) => {
+    const lbl = k === 'sys' ? `${label} · ${SYS_SRC[s.sysSource] || '추정'}` : label;
+    return `<span class="li"><b style="background:${col}"></b>${lbl} <em>${fmtTok(c[k])} · ${Math.round(100*c[k]/total)}%</em></span>`;
+  }).join('');
   return `<div class="stack">${segs}</div><div class="legend">${items}</div>`;
 }
 const HABITS = [
@@ -284,9 +300,18 @@ function habitsCard(s) {
   return `<table class="habits"><tr><th></th><th>이 세션</th><th>폴더 전체</th></tr>` + rows.map((r, k) => `<tr class="${r.mine.n ? '' : 'dim'}"><td>${k + 1}. ${r.label}</td><td>${r.mine.n ? r.mine.n + '건 · <b>' + usd(r.mine.extra) + '</b>' : '<span class="z">0</span>'}</td><td>${r.folder.n ? r.folder.n + '건 · ' + usd(r.folder.extra) : '<span class="z">0</span>'}</td></tr>`).join('') + `</table>` +
     `<div class="sub" style="margin-top:8px">압축·브레이크포인트 이동(정상) ${free.n}건 ${usd(free.extra)}은 제외 · 비용 = 다시 쓴 토큰 × (쓰기 − 읽기 단가)</div>`;
 }
+function riskLine(s) {
+  // D-11. 컨텍스트 카드 상시 표시 — TTL 링 옆 경고(남은 시간과 함께 읽음)와 달리 이건 그냥 규모
+  return `<div class="sub" style="margin-top:8px">지금 사고 나면 <b style="color:var(--warn)">${usd(s.riskUsd)}</b> <span style="color:var(--dim)">(컨텍스트 ${fmtTok(s.ctx)} 재작성)</span></div>`;
+}
 function adviceLine(s) {
   const a = s.advice; if (!a) return '';
-  if (a.recommend) return `<div class="advice"><span>압축으로 <b>${usd(a.saving)}</b> 아끼세요</span><button onclick="openAdvice()">상세</button></div>`;
+  if (a.recommend) {
+    const msg = a.strong
+      ? `압축하면 순이득 <b>${usd(a.saving)}</b> (실비 ${usd(a.compactionCost)}) — 지금 하세요`
+      : `압축으로 순이득 <b>${usd(a.saving)}</b> (실비 ${usd(a.compactionCost)}) 아끼세요`;
+    return `<div class="advice${a.strong ? ' strong' : ''}"><span>${msg}</span><button onclick="openAdvice()">상세</button></div>`;
+  }
   return `<div class="advice dim"><span>압축 이득 작음 (${fmtTok(a.dead)} 폐기물 · 손익분기 ${a.breakEven === null ? '∞' : a.breakEven + '호출'})</span><button onclick="openAdvice()">상세</button></div>`;
 }
 function openAdvice() {
@@ -304,7 +329,7 @@ function openAdvice() {
     <ul>
       <li>지금 호출당 캐시 읽기 <b>${usd(a.perCallNow)}</b> → 압축 후 <b>${usd(a.perCallAfter)}</b> (예상 ${fmtTok(a.postCtx)})</li>
       <li>이 세션 턴당 평균 호출 <b>${a.callsPerTurn.toFixed(1)}</b>회 → 턴당 <b>${usd(a.perCallNow * a.callsPerTurn)}</b></li>
-      <li>압축 비용 추정 <b>${usd(a.compactionCost)}</b> (요약 출력 + 새 컨텍스트 쓰기 + 파일 다시 읽기 80k)</li>
+      <li>압축 비용 추정 <b>${usd(a.compactionCost)}</b> (요약 출력 ${fmtTok(a.summaryTokens)} + 재작성 ${fmtTok(a.rewriteTokens)} + 다시 읽기 ${fmtTok(a.regrowthTokens)}, 고정값)</li>
       <li>손익분기 <b>${a.breakEven === null ? '∞' : a.breakEven + '호출'}</b> · 앞으로 ${a.horizon}호출 기준 순절감 <b style="color:${a.saving > 0 ? 'var(--ok)' : 'var(--bad)'}">${usd(a.saving)}</b></li>
     </ul>
     <div class="sub">추천 조건: 컨텍스트 100k 초과이고 순절감이 압축 비용보다 크면서, 폐기물 25% 이상 또는 손익분기 15호출 이하. 압축은 캐시가 살아있을 때 해야 함(만료 후 압축은 그 호출이 전체를 다시 씀).</div>
@@ -316,7 +341,10 @@ function closeAdvice() { $('#modal').hidden = true; }
 function calNote() {
   const c = state.calibration; if (!c) return '';
   const item = (label, v, n) => `${label} ${fmtTok(v)} <span style="color:${n ? 'var(--ok)' : 'var(--warn)'}">(${n ? '이 폴더 실측 n=' + n : '기본값, 샘플 없음'})</span>`;
-  return `<div class="sub" style="margin-top:8px">보정 상수: ${item('시스템 바닥', c.sys, c.n.sys)} · ${item('압축 후 요약', c.summary, c.n.summary)} · ${item('다시 읽기', c.regrowth, c.n.regrowth)}</div>`;
+  // D-9. 압축 실측 재료는 참고용일 뿐 계산(고정 상수 COMPACT)에는 안 들어간다. 표본 없으면 기본값 없이 "샘플 없음"
+  const ref = (label, v, n, fmt) => `${label} ${v == null ? '<span style="color:var(--warn)">샘플 없음</span>' : `${fmt(v)} <span style="color:var(--ok)">(n=${n})</span>`}`;
+  return `<div class="sub" style="margin-top:8px">보정 상수: ${item('시스템 바닥', c.sys, c.n.sys)} · ${item('압축 후 요약', c.summary, c.n.summary)} · ${item('다시 읽기', c.regrowth, c.n.regrowth)}</div>
+    <div class="sub" style="margin-top:4px">압축 실측(참고용 · 계산엔 안 씀): ${ref('재작성', c.rewrite, c.n.rewrite, fmtTok)} · ${ref('압축 후 컨텍스트', c.postCtx, c.n.postCtx, fmtTok)} · ${ref('압축 실비', c.extra, c.n.extra, usd)}</div>`;
 }
 function switchCells(s) {
   const w = s.switch; if (!w || !w.models.length) return '';
@@ -380,6 +408,13 @@ function drawChart(series, breaks) {
   for (const b of breaks) if (!b.sub) { ctx.strokeStyle = bc[b.cause] || '#b58cff'; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(X(b.ts), T); ctx.lineTo(X(b.ts), H-B); ctx.stroke(); ctx.setLineDash([]); }
 }
 
+function resumeBox(s) {
+  // D-12. TTL 만료 후 갈림길 — 이어가기(riskUsd) vs 새 세션(freshCost), 차액(costDelta)이 방향을 정한다
+  const ok = s.costDelta < 0; // 이어가기가 싸다
+  return `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
+    <div class="sub" style="margin-top:6px">이어가기 <b>${usd(s.riskUsd)}</b> · 새 세션 <b>${usd(s.freshCost)}</b> · 차액 <b style="color:${ok ? 'var(--ok)' : 'var(--warn)'}">${usd(Math.abs(s.costDelta))}</b> (${ok ? '이어가기가' : '새 세션이'} 쌈)</div>
+    <div class="sub" style="margin-top:4px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, ${SYS_SRC[s.sysSource] || '추정'}) · 지금 ${fmtTok(s.ctx)}</div>`;
+}
 function tick() {
   if (!state) return; const s = state.sessions.find(x => x.id === selected); if (!s) return;
   const now = Date.now()+clockSkew; const ttlMs = s.ttlMin*60e3; const left = s.lastCallStart + ttlMs - now;
@@ -392,9 +427,7 @@ function tick() {
   } else {
     el.textContent = '만료'; arc.setAttribute('stroke-dashoffset', '502.6'); arc.setAttribute('stroke', 'var(--bad)');
     sub.textContent = ago(-left) + ' 전 만료';
-    const ok = s.ctx < s.continueThreshold;
-    warn.innerHTML = `<div class="${ok ? 'okbox' : 'warnbox'}">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>
-      <div class="sub" style="margin-top:6px">임계 ${fmtTok(s.continueThreshold)} (바닥 ${fmtTok(s.sysTokens)} + 다시 읽기 ${fmtTok(s.continueThreshold - s.sysTokens)}, 이 폴더 실측) · 지금 ${fmtTok(s.ctx)} · 이어가면 ${usd(s.riskUsd)} 재작성</div>`;
+    warn.innerHTML = resumeBox(s);
   }
   document.querySelectorAll('.ago').forEach(a => a.textContent = ago(now - +a.dataset.ts));
 }

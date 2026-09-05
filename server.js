@@ -23,6 +23,23 @@ const PRICE = {
 const price = (m) => PRICE[m] || { in: 5, out: 25, read: 0.1 };
 const PREFIX_EVENTS = new Set(['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'date_change', 'auto_mode', 'auto_mode_exit', 'nested_memory', 'invoked_skills']);
 const RESUME_RE = /continue from where you left off/i;
+// D-2. 서버 이름 정규화: instructions 쪽 "claude.ai Figma"와 tool 이름 쪽 "claude_ai_Figma"를 같은 키로 합친다
+const normName = n => String(n).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+// deferred_tools_delta.addedNames의 "mcp__<서버>__<툴>"에서 서버 이름만 뽑는다
+function serverNamesFromToolNames(names) {
+  const out = [];
+  for (const n of names || []) {
+    const parts = String(n).split('__');
+    if (parts.length >= 3 && parts[0] === 'mcp') out.push(parts.slice(1, -1).join('__'));
+  }
+  return out;
+}
+// D-4a. 프로젝트 키: ROOT 상대 경로의 첫 디렉터리 세그먼트. 평평하면 ''
+function projectKey(fp) {
+  const rel = path.relative(ROOT, path.dirname(fp)).replace(/\\/g, '/');
+  if (!rel || rel === '.' || rel.startsWith('..')) return '';
+  return rel.split('/')[0];
+}
 // 실측 근거(v0.1.2 do §3, 2026-08 아카이브 한 달): breakpoint_shift 5건의 rewrite 최대 18,708 · |rewrite-shrink| 최대 2,753,
 // effort_change 135건 중 124건이 |rewrite-shrink| ≤ 3,000이고 rewrite 최소는 25,140.
 // 두 원인을 실제로 가르는 것은 MAX_REWRITE 하나이고 여유는 위 5,140 · 아래 1,292다. 표본 5건이라 값은 유지한다.
@@ -43,9 +60,10 @@ function session(id) {
       firstTs: 0, lastTs: 0, lastCallStart: 0, lastCallEnd: 0, lastStop: '', lastTool: '',
       ctx: 0, ttlMin: 5, calls: 0, subCalls: 0, out: 0, think: 0, cacheRead: 0, cacheWrite: 0, cost: 0,
       prompts: 0, compacts: 0, asks: 0, series: [], breaks: [], breakCost: 0, subActive: 0,
-      tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {},
+      tok: { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 }, modelCalls: {}, tokByModel: {}, costByModel: {},
       sysTokens: 0, sysSet: false, comp: null, toolTop: [], compScale: 0,
-      coldStartCw: 0, firstTotal: 0, startRegrowth: null, compactions: [], byCause: {},
+      coldStartCw: 0, warmStartTotal: 0, firstTotal: 0, startRegrowth: null, compactions: [], compactSamples: [], byCause: {},
+      projKey: '', cfgKey: '', sysSource: 'default',
       saved: 0, commits: 0, lateCalls: 0, nightCalls: 0, streak: 0, bestStreak: 0,
       lastAvoidableBreakTs: 0, pendingAsk: false, fullFlag: false,
     };
@@ -86,21 +104,69 @@ const OLD_CALLS = 40;   // tool results older than this many calls count as stal
 const REGROWTH_CALLS = 15; // how many calls after a (re)start we measure regrowth over
 // Calibration: measured from the watched folder itself (medians). Defaults are used only when the folder has no sample, and are flagged in the UI.
 const DEFAULTS = { sys: 45000, summary: 20000, regrowth: 80000 };
-const CAL = { sys: DEFAULTS.sys, summary: DEFAULTS.summary, regrowth: DEFAULTS.regrowth, n: { sys: 0, summary: 0, regrowth: 0 } };
+// D-5. 실측 표본을 담는 3층 버킷. byKey/byProj는 사다리용, folder는 기존 CAL.sys 등 폴더 중앙값의 재료.
+const CAL = {
+  sys: DEFAULTS.sys, summary: DEFAULTS.summary, regrowth: DEFAULTS.regrowth,
+  n: { sys: 0, summary: 0, regrowth: 0, rewrite: 0, extra: 0, postCtx: 0, warmSys: 0 },
+  byKey: new Map(), byProj: new Map(), folder: { cold: [], warm: [], summary: [], regrowth: [], rewrite: [], extra: [], postCtx: [] },
+  cfgKeys: 0, noCfgKey: 0,
+  // D-9. 압축 실측 재료: 표시 전용, 표본이 없으면 기본값 없이 null(화면이 "샘플 없음"으로 그린다)
+  rewrite: null, extra: null, postCtx: null, warmSys: null,
+};
 const median = a => { if (!a.length) return null; const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
+// byKey · byProj는 {sid, v} 표본을 담아 resolveSys가 자기 자신의 표본을 빼고 median을 낼 수 있게 한다(자기 자신뿐이면
+// 그 칸은 못 맞은 것으로 보고 다음 칸으로 내려간다). folder는 기존 CAL.sys와 같은 값을 배열로 유지한다(자기 제외 없음).
+const medianExcl = (entries, sid) => median(entries.filter(e => e.sid !== sid).map(e => e.v));
+const keyOf = (projKey, cfgKey) => JSON.stringify([projKey, cfgKey]);
 function calibrate() {
-  const sys = [], summary = [], regrowth = [];
+  const byKey = new Map(), byProj = new Map();
+  const folder = { cold: [], warm: [], summary: [], regrowth: [], rewrite: [], extra: [], postCtx: [] };
+  const bucket = (map, k) => { let b = map.get(k); if (!b) { b = { cold: [], warm: [] }; map.set(k, b); } return b; };
+  let noKey = 0;
   for (const s of sessions.values()) {
-    if (s.coldStartCw) sys.push(s.coldStartCw);
-    for (const c of s.compactions) { if (c.summary != null) summary.push(c.summary); if (c.regrowth != null) regrowth.push(c.regrowth); }
-    if (s.startRegrowth != null) regrowth.push(s.startRegrowth);
+    if (!s.calls) continue;
+    if (!s.cfgKey) noKey++; // cfgKey를 못 만든 세션은 sys 보정(콜드/웜 표본)에서만 뺀다 — 압축 실측은 구성과 무관해 그대로 쓴다
+    if (s.cfgKey) {
+      const bk = bucket(byKey, keyOf(s.projKey, s.cfgKey)), bp = bucket(byProj, s.projKey);
+      if (s.coldStartCw) { bk.cold.push({ sid: s.id, v: s.coldStartCw }); bp.cold.push({ sid: s.id, v: s.coldStartCw }); folder.cold.push(s.coldStartCw); }
+      if (s.warmStartTotal) { bk.warm.push({ sid: s.id, v: s.warmStartTotal }); bp.warm.push({ sid: s.id, v: s.warmStartTotal }); folder.warm.push(s.warmStartTotal); }
+    }
+    for (const c of s.compactions) { if (c.summary != null) folder.summary.push(c.summary); if (c.regrowth != null) folder.regrowth.push(c.regrowth); }
+    if (s.startRegrowth != null) folder.regrowth.push(s.startRegrowth);
+    for (const cs of s.compactSamples) { folder.rewrite.push(cs.rewrite); folder.extra.push(cs.extra); folder.postCtx.push(cs.ctx); }
   }
-  const m = median(sys); CAL.sys = m != null ? m : DEFAULTS.sys; CAL.n.sys = sys.length;
-  const ms = median(summary); CAL.summary = ms != null ? ms : DEFAULTS.summary; CAL.n.summary = summary.length;
-  const mr = median(regrowth); CAL.regrowth = mr != null ? mr : DEFAULTS.regrowth; CAL.n.regrowth = regrowth.length;
+  CAL.byKey = byKey; CAL.byProj = byProj; CAL.folder = folder;
+  CAL.cfgKeys = byKey.size; CAL.noCfgKey = noKey;
+  const m = median(folder.cold); CAL.sys = m != null ? m : DEFAULTS.sys; CAL.n.sys = folder.cold.length;
+  const ms = median(folder.summary); CAL.summary = ms != null ? ms : DEFAULTS.summary; CAL.n.summary = folder.summary.length;
+  const mr = median(folder.regrowth); CAL.regrowth = mr != null ? mr : DEFAULTS.regrowth; CAL.n.regrowth = folder.regrowth.length;
+  CAL.rewrite = median(folder.rewrite); CAL.n.rewrite = folder.rewrite.length;
+  CAL.extra = median(folder.extra); CAL.n.extra = folder.extra.length;
+  CAL.postCtx = median(folder.postCtx); CAL.n.postCtx = folder.postCtx.length;
+  CAL.warmSys = median(folder.warm); CAL.n.warmSys = folder.warm.length;
 }
+// D-6 · D-7. sys 8단계 사다리: cold-self -> cold-key -> warm-key -> cold-project -> warm-project -> cold-folder -> warm-folder -> default.
+// 최소 표본 n=1 (D-7). ctx 상한은 cold-self를 제외한 모든 칸에 적용된다. key / project 칸은 자기 자신의 표본을 빼고 봐야
+// "동료가 있어 더 구체적인 값을 안다"는 뜻이 산다. 안 빼면 표본이 하나뿐이던 세션도 항상 자기 key 칸에서 자기 값을 되받아
+// folder까지 내려갈 일이 없어져 사다리가 무의미해진다. folder는 그 반대로 기존 CAL.sys처럼 전체(자기 포함) 중앙값이다.
+function resolveSys(s, ctx) {
+  if (s.coldStartCw) return { sys: s.coldStartCw, source: 'cold-self' };
+  const cap = v => Math.min(v, ctx);
+  const bk = CAL.byKey.get(keyOf(s.projKey, s.cfgKey));
+  let m;
+  if (bk && (m = medianExcl(bk.cold, s.id)) != null) return { sys: cap(m), source: 'cold-key' };
+  if (bk && (m = medianExcl(bk.warm, s.id)) != null) return { sys: cap(m), source: 'warm-key' };
+  const bp = CAL.byProj.get(s.projKey);
+  if (bp && (m = medianExcl(bp.cold, s.id)) != null) return { sys: cap(m), source: 'cold-project' };
+  if (bp && (m = medianExcl(bp.warm, s.id)) != null) return { sys: cap(m), source: 'warm-project' };
+  if ((m = median(CAL.folder.cold)) != null) return { sys: cap(m), source: 'cold-folder' };
+  if ((m = median(CAL.folder.warm)) != null) return { sys: cap(m), source: 'warm-folder' };
+  return { sys: cap(DEFAULTS.sys), source: 'default' };
+}
+// D-8. 압축 비용 고정 상수. 폴더 · 사용자가 무엇이든 이 값이다(CAL 실측과 분리)
+const COMPACT = { summary: 20000, rewrite: 55000, regrowth: 60000 };
+const STRONG_RATIO = 3; // D-10. 순이득이 압축 실비의 이 배수를 넘으면 톤을 강화한다(잠정치)
 function compactAdvice(f, s, total, scale) {
-  const SUMMARY_TOKENS = CAL.summary, SUMMARY_OUT = CAL.summary, REGROWTH = CAL.regrowth; // summary output ≈ summary size in context
   const lastRead = {}; for (const r of f.results) if (r.name === 'Read' && r.path) lastRead[r.path] = r.idx;
   let dupRead = 0, staleRead = 0, oldResults = 0, dupN = 0, staleN = 0, oldN = 0;
   for (const r of f.results) {
@@ -112,22 +178,50 @@ function compactAdvice(f, s, total, scale) {
   const tok = c => Math.round(c * scale);
   const dead = tok(dupRead + staleRead + oldResults);
   const p = price(s.model || 'claude-sonnet-5');
-  const postCtx = Math.min(total, s.sysTokens + SUMMARY_TOKENS);
+  const postCtx = Math.min(total, s.sysTokens + COMPACT.summary);
   const perCallNow = total * p.in * p.read / 1e6, perCallAfter = postCtx * p.in * p.read / 1e6;
-  const compactionCost = (SUMMARY_OUT * p.out + postCtx * p.in * 2 + REGROWTH * p.in * 2) / 1e6;
+  const compactionCost = (COMPACT.summary * p.out + COMPACT.rewrite * p.in * 2 + COMPACT.regrowth * p.in * 2) / 1e6;
   const perCallSave = Math.max(0, perCallNow - perCallAfter);
   const breakEven = perCallSave > 0 ? Math.ceil(compactionCost / perCallSave) : Infinity;
   const callsPerTurn = s.prompts ? s.calls / s.prompts : 10;
   const horizon = 50;
   const saving = perCallSave * horizon - compactionCost;
+  const recommend = total > 100000 && saving > compactionCost && (dead / total > 0.25 || breakEven <= 15); // saving must at least double the compaction cost
   return { dead, dupRead: tok(dupRead), staleRead: tok(staleRead), oldResults: tok(oldResults), dupN, staleN, oldN, deadPct: total ? dead / total : 0,
     perCallNow, perCallAfter, compactionCost, breakEven, callsPerTurn, horizon, saving, postCtx,
-    recommend: total > 100000 && saving > compactionCost && (dead / total > 0.25 || breakEven <= 15) }; // saving must at least double the compaction cost
+    summaryTokens: COMPACT.summary, rewriteTokens: COMPACT.rewrite, regrowthTokens: COMPACT.regrowth,
+    recommend, strong: recommend && saving >= compactionCost * STRONG_RATIO };
+}
+
+const family = m => (m || '').startsWith('claude-fable') ? 'claude-fable-5' : m;
+
+// ---- model comparison: what this session's actual tokens would have cost under each model's pricing
+// D-13(질문 q1로 개정). "현재 모델"은 family()로 묶어 판정 — 세션이 실제 쓴 마지막 모델이 비교 목록의
+// 대표 모델과 계열만 같으면(fable-5 실사용 -> fable-5-1 칸) "현재"로 표시한다. 배수가 1.00×가 아닐 수
+// 있는데(단가가 다르면) 그대로 보여준다 — 이 카드 전체가 재미로 보는 추정치라는 문구를 화면에 남긴다(D-9 톤)
+const COMPARE_MODELS = [
+  ['claude-fable-5-1', 'fable'], ['claude-opus-5', 'opus'],
+  ['claude-sonnet-5', 'sonnet'], ['claude-haiku-4-5-20251001', 'haiku'],
+];
+function costAsTok(tok, model) {
+  const p = price(model);
+  return (tok.in * p.in + tok.cw1h * p.in * 2 + (tok.cw5m + tok.cwOther) * p.in * 1.25
+        + tok.cr * p.in * p.read + tok.out * p.out) / 1e6;
+}
+function modelCompare(s) {
+  const breakdown = Object.entries(s.costByModel).map(([model, cost]) => ({ model, calls: s.modelCalls[model] || 0, cost })).sort((a, b) => b.cost - a.cost);
+  const actual = s.cost;
+  // D-14. 넷 다 항상 렌더한다 — 현재 모델 칸도 빼지 않는다
+  const curFamily = family(s.model);
+  const rows = COMPARE_MODELS.map(([model, label]) => {
+    const cost = costAsTok(s.tok, model);
+    return { model, label, cost, ratio: actual ? cost / actual : null, current: family(model) === curFamily };
+  });
+  return { actual, mixed: Object.keys(s.costByModel).length > 1, breakdown, rows };
 }
 
 // ---- model switch advice: is downgrading worth it, and how (continue / new session / compact then switch)
 const SWITCH_MODELS = [['claude-fable-5', 'fable'], ['claude-opus-5', 'opus'], ['claude-sonnet-5', 'sonnet']]; // haiku deliberately excluded: never a real candidate
-const family = m => (m || '').startsWith('claude-fable') ? 'claude-fable-5' : m;
 
 // ---- escalation advice: "I'm stuck, I want a stronger model" — how to do it without paying for the whole context twice
 function escalationAdvice(s, total) {
@@ -176,10 +270,19 @@ function handleRecord(f, d) {
     case 'ai-title': if (!s.title) s.title = d.aiTitle; return;
     case 'mode': s.mode = d.mode; return;
     case 'system':
-      if (d.subtype === 'compact_boundary') { s.compacts++; f.pending.push('compact'); }
+      if (d.subtype === 'compact_boundary') {
+        s.compacts++; f.pending.push('compact');
+        if (d.compactMetadata && d.compactMetadata.postTokens != null) f.compactPost = d.compactMetadata.postTokens; // D-9
+      }
       return;
     case 'attachment':
       if (d.attachment && PREFIX_EVENTS.has(d.attachment.type)) f.pending.push('prefix:' + d.attachment.type);
+      // D-1 · D-3. 첫 assistant 호출 전까지 MCP 구성 키 재료(서버 이름)를 모은다
+      if (!f.cfgFrozen && d.attachment) {
+        const a = d.attachment;
+        if (a.type === 'mcp_instructions_delta' && Array.isArray(a.addedNames)) for (const n of a.addedNames) f.cfgNames.add(normName(n));
+        else if (a.type === 'deferred_tools_delta' && Array.isArray(a.addedNames)) for (const sv of serverNamesFromToolNames(a.addedNames)) f.cfgNames.add(normName(sv));
+      }
       if (!f.isSub && d.attachment) { const a = d.attachment; const v = a.content != null ? a.content : (a.text != null ? a.text : ''); f.comp.reminders += typeof v === 'string' ? v.length : JSON.stringify(v).length; } // hook stdout is not shown to the model
       return;
     case 'user': {
@@ -204,6 +307,8 @@ function handleRecord(f, d) {
     }
     case 'assistant': {
       const m = d.message; if (!m || !m.usage || m.model === '<synthetic>') return;
+      // D-3. 그 파일의 첫 유효 assistant 호출에서 구성 키 수집을 동결한다
+      if (!f.cfgFrozen) f.cfgFrozen = true;
       if (Array.isArray(m.content)) for (const b of m.content) {
         if (b.type === 'tool_use') {
           s.lastTool = b.name; if (b.name === 'AskUserQuestion') { s.asks++; if (!f.isSub) s.pendingAsk = true; }
@@ -222,6 +327,10 @@ function handleRecord(f, d) {
       s.cost += cost; s.out += t.out; s.think += t.think; s.cacheRead += t.cr; s.cacheWrite += t.cw;
       s.tok.in += t.in; s.tok.cw1h += t.cw1h; s.tok.cw5m += t.cw5m; s.tok.cwOther += Math.max(0, t.cw - t.cw1h - t.cw5m); s.tok.cr += t.cr; s.tok.out += t.out;
       s.modelCalls[m.model] = (s.modelCalls[m.model] || 0) + 1;
+      // D-13 · D-14. 모델별 실측 토큰·실비 누적 — modelCompare()의 breakdown 재료
+      { const tm = s.tokByModel[m.model] = s.tokByModel[m.model] || { in: 0, cw1h: 0, cw5m: 0, cwOther: 0, cr: 0, out: 0 };
+        tm.in += t.in; tm.cw1h += t.cw1h; tm.cw5m += t.cw5m; tm.cwOther += Math.max(0, t.cw - t.cw1h - t.cw5m); tm.cr += t.cr; tm.out += t.out;
+        s.costByModel[m.model] = (s.costByModel[m.model] || 0) + cost; }
       { const pp = price(m.model); s.saved += t.cr * pp.in * (1 - pp.read) / 1e6; } // what caching saved vs. paying list price for those tokens
       if (ts) { const h = (new Date(ts).getUTCHours() + 9) % 24; if (h >= 19 || h < 6) s.lateCalls++; if (h < 6) s.nightCalls++; }
       let brokeNow = false;
@@ -247,6 +356,7 @@ function handleRecord(f, d) {
           else { const p = events.find(e => e.startsWith('prefix:')); cause = p ? p.slice(7) : 'unexplained'; }
           const p = price(m.model); const mult = t.cw1h > 0 ? 2 : 1.25;
           const extra = rewrite * p.in * (mult - p.read) / 1e6;
+          if (!f.isSub && cause === 'compact') s.compactSamples.push({ rewrite, extra, ctx: total }); // D-9. 압축 직후 실측(표시 전용)
           if (!FREE_CAUSES.has(cause)) s.breakCost += extra;
           const bc = s.byCause[cause] = s.byCause[cause] || { n: 0, rewrite: 0, extra: 0 }; bc.n++; bc.rewrite += rewrite; bc.extra += extra;
           if (!FREE_CAUSES.has(cause) && !f.isSub) { brokeNow = true; s.lastAvoidableBreakTs = ts; }
@@ -261,10 +371,17 @@ function handleRecord(f, d) {
         if (brokeNow) s.streak = 0; else s.streak++; if (s.streak > s.bestStreak) s.bestStreak = s.streak;
         s.model = m.model; s.effort = d.effort || ''; s.skill = d.attributionSkill || ''; s.ctx = total; s.lastStop = m.stop_reason || '';
         s.lastCallStart = (f.lastUserTs && f.lastUserTs <= ts) ? f.lastUserTs : ts; s.lastCallEnd = ts;
-        // system prompt + tools + CLAUDE.md: measurable only on a true cold start (first call, no cache read); resumed sessions get the measured median
-        if (!s.sysSet) { s.sysSet = true; const cold = s.calls === 1 && t.cr === 0; if (cold) s.coldStartCw = t.cw + t.in; s.sysTokens = cold ? t.cw + t.in : Math.min(CAL.sys, total); s.firstTotal = total; }
+        // system prompt + tools + CLAUDE.md: measurable only on a true cold start (first call, no cache read); resumed sessions get the measured sys ladder (D-6)
+        if (!s.sysSet) {
+          s.sysSet = true;
+          s.projKey = projectKey(f.fp); s.cfgKey = [...f.cfgNames].sort().join('|'); // D-4 · D-1, 이 첫 호출 시점에 확정
+          const cold = s.calls === 1 && t.cr === 0;
+          if (cold) { s.coldStartCw = t.cw + t.in; s.sysTokens = s.coldStartCw; s.sysSource = 'cold-self'; }
+          else { s.warmStartTotal = total; const r = resolveSys(s, total); s.sysTokens = r.sys; s.sysSource = r.source; }
+          s.firstTotal = total;
+        }
         if (s.calls === REGROWTH_CALLS + 1 && s.startRegrowth == null) s.startRegrowth = Math.max(0, total - s.firstTotal);
-        if (events.includes('compact')) s.compactions.push({ at: s.calls, post: total, summary: Math.max(0, total - s.sysTokens), regrowth: null });
+        if (events.includes('compact')) s.compactions.push({ at: s.calls, post: total, summary: f.compactPost != null ? f.compactPost : null, regrowth: null }); // D-9 · R-4: 실측 없으면 null
         for (const c of s.compactions) if (c.regrowth == null && s.calls === c.at + REGROWTH_CALLS) c.regrowth = Math.max(0, total - c.post);
         f.callIdx++;
         const sc = scaledComp(f, total, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale;
@@ -281,9 +398,9 @@ function handleRecord(f, d) {
 
 function readFile(fp) {
   let f = files.get(fp);
-  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), uuidSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
+  if (!f) { f = { fp, offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), uuidSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0, cfgNames: new Set(), cfgFrozen: false, compactPost: null }; files.set(fp, f); }
   let st; try { st = fs.statSync(fp); } catch { return; }
-  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.uuidSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.uuidSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; f.cfgNames = new Set(); f.cfgFrozen = false; f.compactPost = null; } // truncated/rewritten
   if (st.size === f.offset) return;
   const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
   fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
@@ -314,19 +431,26 @@ function charState(s, now) {
 // ---------------- snapshot ----------------
 function snapshot() {
   const now = Date.now();
-  const list = [...sessions.values()].filter(s => s.calls > 0).sort((a, b) => b.lastTs - a.lastTs).map(s => ({
+  const list = [...sessions.values()].filter(s => s.calls > 0).sort((a, b) => b.lastTs - a.lastTs).map(s => {
+    const p = price(s.model);
+    const continueThreshold = (s.sysTokens || CAL.sys) + CAL.regrowth;
+    const riskUsd = s.ctx * p.in * 2 / 1e6;
+    // D-12. freshCost: 새 세션에서 바닥+다시읽기까지 다시 쓰는 비용. costDelta 양수면 새 세션이 싸다
+    const freshCost = continueThreshold * p.in * 2 / 1e6;
+    return {
     id: s.id, title: s.title || '(untitled)', cwd: s.cwd, entry: s.entry, model: s.model, effort: s.effort, skill: s.skill,
     firstTs: s.firstTs, lastTs: s.lastTs, lastCallStart: s.lastCallStart, lastCallEnd: s.lastCallEnd, lastStop: s.lastStop, lastTool: s.lastTool,
     ctx: s.ctx, ttlMin: s.ttlMin, calls: s.calls, subCalls: s.subCalls, out: s.out, think: s.think, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite,
     cost: s.cost, prompts: s.prompts, compacts: s.compacts, asks: s.asks, breakCost: s.breakCost,
-    riskUsd: s.ctx * price(s.model).in * 2 / 1e6,
+    riskUsd, freshCost, costDelta: riskUsd - freshCost,
     tok: s.tok, mainModel: Object.entries(s.modelCalls).sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || s.model,
-    comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, switch: s.switch || null, sysTokens: s.sysTokens, byCause: s.byCause,
-    continueThreshold: (s.sysTokens || CAL.sys) + CAL.regrowth,
+    modelCompare: modelCompare(s),
+    comp: s.comp, toolTop: s.toolTop, compScale: s.compScale, advice: s.advice || null, switch: s.switch || null, sysTokens: s.sysTokens, sysSource: s.sysSource, cfgKey: s.cfgKey, projKey: s.projKey, byCause: s.byCause,
+    continueThreshold,
     saved: s.saved, commits: s.commits, lateCalls: s.lateCalls, nightCalls: s.nightCalls, streak: s.streak, bestStreak: s.bestStreak,
     charState: charState(s, now), // after TTL expiry: continuing beats a new session iff ctx < system floor + regrowth (price/horizon independent)
     busy: s.lastStop === 'tool_use' && now - s.lastTs < 3 * 60e3, subActive: now - s.subActive < 3 * 60e3,
-  }));
+  };});
   return { version, root: ROOT, now, calibration: CAL, sessions: list };
 }
 function detail(id) {
@@ -345,7 +469,9 @@ function onChange() { clearTimeout(debounce); debounce = setTimeout(() => { scan
 function recomputeAdvice() {
   for (const [fp, f] of files) {
     if (f.isSub || !f.prev || !f.sessionId) continue; const s = sessions.get(f.sessionId); if (!s || !s.calls) continue;
-    if (!s.coldStartCw) { s.sysTokens = Math.min(CAL.sys, s.ctx); const sc = scaledComp(f, s.ctx, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale; } // resumed sessions: system floor comes from calibration
+    // D-6. 보정이 스캔마다 달라지므로 cold-self가 아닌 세션은 매번 사다리를 다시 탄다
+    const r = resolveSys(s, s.ctx); s.sysTokens = r.sys; s.sysSource = r.source;
+    if (r.source !== 'cold-self') { const sc = scaledComp(f, s.ctx, s.sysTokens); s.comp = sc.comp; s.toolTop = sc.tools; s.compScale = sc.scale; }
     s.advice = compactAdvice(f, s, s.ctx, s.compScale); s.switch = escalationAdvice(s,s.ctx);
   }
 }
@@ -372,7 +498,11 @@ const server = http.createServer((req, res) => {
 function reset() {
   files.clear(); sessions.clear(); version = 0;
   CAL.sys = DEFAULTS.sys; CAL.summary = DEFAULTS.summary; CAL.regrowth = DEFAULTS.regrowth;
-  CAL.n = { sys: 0, summary: 0, regrowth: 0 };
+  CAL.n = { sys: 0, summary: 0, regrowth: 0, rewrite: 0, extra: 0, postCtx: 0, warmSys: 0 };
+  CAL.byKey = new Map(); CAL.byProj = new Map();
+  CAL.folder = { cold: [], warm: [], summary: [], regrowth: [], rewrite: [], extra: [], postCtx: [] };
+  CAL.cfgKeys = 0; CAL.noCfgKey = 0;
+  CAL.rewrite = null; CAL.extra = null; CAL.postCtx = null; CAL.warmSys = null;
 }
 // target: 디렉터리 · 파일 · 그 배열. 항상 reset부터 한다.
 function replay(target) {
@@ -390,6 +520,11 @@ if (require.main === module) {
   scan(ROOT); calibrate(); recomputeAdvice();
   console.log('[cc-monitor] sessions:', sessions.size, 'files:', files.size);
   console.log('[cc-monitor] calibration (folder medians): sys=' + CAL.sys + ' (n=' + CAL.n.sys + ') summary=' + CAL.summary + ' (n=' + CAL.n.summary + ') regrowth=' + CAL.regrowth + ' (n=' + CAL.n.regrowth + ')');
+  console.log(`[cc-monitor] sys ladder: keys=${CAL.cfgKeys} noKey=${CAL.noCfgKey} coldFolder=${CAL.folder.cold.length} warmFolder=${CAL.folder.warm.length}`);
+  for (const [key, b] of CAL.byKey) {
+    const cm = median(b.cold.map(e => e.v)), wm = median(b.warm.map(e => e.v));
+    console.log(`[cc-monitor]   key=${key.slice(0, 40)} cold n=${b.cold.length} med=${cm != null ? cm : '-'} warm n=${b.warm.length} med=${wm != null ? wm : '-'}`);
+  }
   try { fs.watch(ROOT, { recursive: true }, onChange); console.log('[cc-monitor] watching (recursive)'); }
   catch (e) { console.log('[cc-monitor] recursive watch unavailable, polling every 2s'); setInterval(onChange, 2000); }
   setInterval(() => { if (clients.size) broadcast(); }, 15000); // keep busy/idle flags fresh
