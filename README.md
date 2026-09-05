@@ -1,4 +1,4 @@
-# cc-monitor
+# Cache Monitor for Claude Code
 
 Claude Code 트랜스크립트(`~/.claude/projects/**/*.jsonl`)를 실시간으로 지켜보는 계기판.
 입력은 없고 모니터링만 한다. 형은 계속 VS Code/터미널에서 치고, 이 창은 옆 모니터에 띄워둔다.
