@@ -23,7 +23,9 @@ const PRICE = {
 const price = (m) => PRICE[m] || { in: 5, out: 25, read: 0.1 };
 const PREFIX_EVENTS = new Set(['deferred_tools_delta', 'mcp_instructions_delta', 'agent_listing_delta', 'skill_listing', 'date_change', 'auto_mode', 'auto_mode_exit', 'nested_memory', 'invoked_skills']);
 const RESUME_RE = /continue from where you left off/i;
-// 잠정치: 근거는 plan F-8 5건과 백로그 128ae4a7 1건뿐이다. P0-4 진단 필드로 한 달 더 보고 조정한다(R-2).
+// 실측 근거(v0.1.2 do §3, 2026-08 아카이브 한 달): breakpoint_shift 5건의 rewrite 최대 18,708 · |rewrite-shrink| 최대 2,753,
+// effort_change 135건 중 124건이 |rewrite-shrink| ≤ 3,000이고 rewrite 최소는 25,140.
+// 두 원인을 실제로 가르는 것은 MAX_REWRITE 하나이고 여유는 위 5,140 · 아래 1,292다. 표본 5건이라 값은 유지한다.
 const BP_MAX_REWRITE = 20000;   // 이보다 크면 브레이크포인트 이동으로 보지 않는다
 const BP_SHRINK_SLACK = 3000;   // |rewrite - shrink| 허용 폭 (= 직전 호출의 cw)
 const FREE_CAUSES = new Set(['compact', 'breakpoint_shift']); // 손실로 세지 않는 원인
@@ -161,6 +163,8 @@ function callCost(model, t) {
 }
 
 function handleRecord(f, d) {
+  // 재기록 구간: CC가 재개하며 이력을 다시 쓴 행은 uuid가 같다. 종류 불문 한 번만 센다.
+  if (d.uuid) { if (f.uuidSeen.has(d.uuid)) return; f.uuidSeen.add(d.uuid); }
   if (d.sessionId) f.sessionId = d.sessionId;
   if (!f.sessionId) return;
   const s = session(f.sessionId);
@@ -183,9 +187,7 @@ function handleRecord(f, d) {
       if (d.isCompactSummary) f.pending.push('compact');
       if (!f.isSub) f.lastUserTs = ts;
       const c = d.message && d.message.content;
-      if (d.isMeta && RESUME_RE.test(markerText(c))) {
-        if (!f.markerSeen.has(d.uuid)) { f.markerSeen.add(d.uuid); f.pending.push('resume'); }
-      }
+      if (d.isMeta && RESUME_RE.test(markerText(c))) f.pending.push('resume');
       const human = !d.isMeta && !f.isSub && (typeof c === 'string' || (Array.isArray(c) && c.every(b => b.type === 'text' || b.type === 'image')));
       if (human) s.prompts++;
       if (!f.isSub && Array.isArray(c) && c.some(b => b.type === 'tool_result')) s.pendingAsk = false;
@@ -279,9 +281,9 @@ function handleRecord(f, d) {
 
 function readFile(fp) {
   let f = files.get(fp);
-  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), markerSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
+  if (!f) { f = { offset: 0, rest: '', sessionId: null, isSub: /[\\/]subagents[\\/]/.test(fp), seen: new Set(), uuidSeen: new Set(), prev: null, pending: [], lastUserTs: 0, comp: newComp(), toolChars: {}, toolNames: {}, results: [], edited: {}, callIdx: 0 }; files.set(fp, f); }
   let st; try { st = fs.statSync(fp); } catch { return; }
-  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.markerSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
+  if (st.size < f.offset) { f.offset = 0; f.rest = ''; f.seen = new Set(); f.uuidSeen = new Set(); f.prev = null; f.comp = newComp(); f.toolChars = {}; f.toolNames = {}; f.results = []; f.edited = {}; f.callIdx = 0; } // truncated/rewritten
   if (st.size === f.offset) return;
   const fd = fs.openSync(fp, 'r'); const len = st.size - f.offset; const buf = Buffer.alloc(len);
   fs.readSync(fd, buf, 0, len, f.offset); fs.closeSync(fd); f.offset = st.size;
