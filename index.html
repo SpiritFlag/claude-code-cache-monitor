@@ -378,6 +378,7 @@ function ctxNote(s) {
 }
 
 // 그래프 상수와 상태 (D-12)
+const LINE_COLOR = '#e6e8ee';        // 총 컨텍스트 윤곽선 · 모델과 무관한 한 색 (D-11 · D-12)
 const PROMPT_COLOR = '#e6e9f0';      // 구성 8색·원인 8색 어디와도 겹치지 않는 중립색
 const HIT_PX = 8;                    // 프롬프트 툴팁 히트 반경 (R-5: 가장 가까운 점 하나)
 let chartMarks = { prompts: [] };    // drawChart가 남기는 [{x, y, t}]
@@ -475,7 +476,6 @@ function drawChart(series, breaks, prompts) {
   const CX = a => Math.max(L, Math.min(W - R, X(a))); // 축 밖 클램프 (D-7)
   ctx.strokeStyle = '#262b36'; ctx.fillStyle = '#8b93a7'; ctx.font = '11px monospace';
   for (let i = 0; i <= 4; i++) { const v = maxY*i/4, y = Y(v); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W-R, y); ctx.stroke(); ctx.fillText(fmtTok(v), 4, y+4); }
-  const col = { 'claude-sonnet-5':'#6ea8fe', 'claude-opus-5':'#3ddc84', 'claude-fable-5':'#ff9f43', 'claude-fable-5-1':'#ff9f43', 'claude-haiku-4-5-20251001':'#b58cff' };
   // stacked composition areas (sys, user, assistant, toolInput, toolResult, reminders, summary, images)
   const hasComp = series.some(p => p.c);
   // 축 왼쪽 빈 구간을 메우는 선두 점 (D-16). 스택·선·채우기만 이 배열로 그리고,
@@ -493,11 +493,17 @@ function drawChart(series, breaks, prompts) {
       ctx.closePath(); ctx.fill();
     }
   } else {
+    // hasComp가 아닐 때의 채우기 — 사다리꼴 여러 개 대신 폴리곤 하나 (D-14)
     const y0 = Y(0);
-    for (let i = 1; i < pts.length; i++) { const a = pts[i-1], b = pts[i]; ctx.fillStyle = (col[b.m] || '#ccc') + '22'; ctx.beginPath(); ctx.moveTo(X(a.a), y0); ctx.lineTo(X(a.a), Y(a.ctx)); ctx.lineTo(X(b.a), Y(b.ctx)); ctx.lineTo(X(b.a), y0); ctx.closePath(); ctx.fill(); }
+    ctx.fillStyle = LINE_COLOR + '22'; ctx.beginPath(); ctx.moveTo(X(pts[0].a), y0);
+    for (const p of pts) ctx.lineTo(X(p.a), Y(p.ctx));
+    ctx.lineTo(X(pts[pts.length - 1].a), y0); ctx.closePath(); ctx.fill();
   }
-  ctx.lineWidth = 1.5;
-  for (let i = 1; i < pts.length; i++) { const a = pts[i-1], b = pts[i]; ctx.strokeStyle = col[b.m] || '#ccc'; ctx.beginPath(); ctx.moveTo(X(a.a), Y(a.ctx)); ctx.lineTo(X(b.a), Y(b.ctx)); ctx.stroke(); }
+  // 윤곽선 — 구간별 stroke 대신 한 path 한 번 (D-13)
+  ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.strokeStyle = LINE_COLOR;
+  ctx.beginPath();
+  pts.forEach((p, i) => { const x = X(p.a), y = Y(p.ctx); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.stroke();
   for (const b of breaks) if (!b.sub) { ctx.strokeStyle = causeColor(b.cause); ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(CX(b.a), T); ctx.lineTo(CX(b.a), H-B); ctx.stroke(); ctx.setLineDash([]); }
   // 프롬프트 마커 (D-12 · D-14): 히트 테스트가 쓸 좌표를 그린 쪽이 남긴다
   chartMarks = { prompts: [] };
