@@ -383,7 +383,7 @@ function ctxLegend(s) {
   }).join('');
   return `<div class="complegend">${rows}</div>`;
 }
-// 추정 단서 한 줄. comp가 없으면 빈 문자열. (D-8, do §2 #3 — head 줄 바로 아래로 배치)
+// 추정 단서 한 줄. comp가 없으면 빈 문자열. (D-8 v1.4 — 범례 아래가 아니라 바 바로 위)
 function ctxNote(s) {
   return s.comp ? `<div class="cl-note">구성은 추정 — 문자수 비율을 실제 컨텍스트에 맞춰 보정</div>` : '';
 }
