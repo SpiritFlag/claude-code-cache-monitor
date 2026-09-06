@@ -174,7 +174,14 @@ const perHrNum = (cost, ms) => ms > 0 ? cost / (ms / 3600e3) : null;
 let state = null, selected = null, detailCache = {}, clockSkew = 0;
 
 const es = new EventSource('/events');
-es.onmessage = e => { state = JSON.parse(e.data); clockSkew = state.now - Date.now(); if (!selected && state.sessions.length) selected = state.sessions[0].id; renderList(); loadDetail(selected, true); updateTab(); };
+es.onmessage = e => {
+  const snap = JSON.parse(e.data);
+  detectTabTransitions(snap);                       // state를 갈아 끼우기 전
+  state = snap; clockSkew = state.now - Date.now();
+  if (!selected && state.sessions.length) selected = state.sessions[0].id;
+  if (tabBlink) tabBlink.phase ^= 1;                // 스냅샷 도착도 깜빡임의 박자다 (D-7 · R-2)
+  renderList(); loadDetail(selected, true); updateTab();
+};
 
 function status(s) { const now = Date.now()+clockSkew; if (s.busy || s.subActive) return 'busy'; if (now - s.lastCallEnd < s.ttlMin*60e3) return 'live'; return 'dead'; }
 
@@ -542,6 +549,7 @@ function resumeBox(s) {
   return `<div class="${ok ? 'okbox' : 'warnbox'}" style="text-align:center;font-weight:600">${ok ? '이 세션에서 대화를 이어가도 됩니다' : '새로운 세션에서 대화를 시작하세요'}</div>`;
 }
 function tick() {
+  if (tabBlink) tabBlink.phase ^= 1;
   updateTab();                                          // state·selected·#ttl 검사보다 앞 (D-17)
   if (!state) return; const s = state.sessions.find(x => x.id === selected); if (!s) return;
   const now = Date.now()+clockSkew; const ttlMs = s.ttlMin*60e3; const left = s.lastCallStart + ttlMs - now;
@@ -575,12 +583,19 @@ $('#navbtn').onclick = () => {
 try { applyNav(localStorage.getItem(NAVKEY) === '1'); } catch (e) { }
 let rsz = null; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { const d = detailCache[selected]; if (d) drawChart(d.series, d.breaks, d.prompts); }, 100); });
 
+window.addEventListener('focus', stopBlink);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) stopBlink(); });
+
 // ---- browser tab: favicon · title · blink · desktop notification
 // 탭은 화면에서 고른 세션(selected)이 아니라 가장 최근 활동 세션(sessions[0])을 따른다 (D-2)
 const FAV_SIZE = 32;                                   // 캔버스 한 변. 탭 16px의 2배 (D-9)
 const FAV_CROP = { zoom: 1, cx: 0.5, cy: 0.5 };        // R-1 우회 손잡이. zoom>1이면 원본의 그만큼만 잘라 채운다 (D-11)
+const BADGE_STATES = new Set(['asking', 'broke']);     // (D-12)
+const BLINK_MARK = '\u{1F514} ';                       // 깜빡일 때 제목 앞에 붙는 종 (D-6)
 const TAB_BASE_TITLE = 'cc-monitor';                   // 세션이 하나도 없을 때 (FR-9)
 
+let tabBlink = null;         // 깜빡이는 중이면 { phase: 0|1 }, 아니면 null
+let prevChar = new Map();    // sessionId -> 직전 스냅샷의 charState (D-5)
 const favImgs = new Map();   // state -> HTMLImageElement, lazy (D-10)
 let favDrawn = '';           // 마지막으로 그린 `${state}|${badge}` 키. 같으면 다시 안 그린다
 
@@ -631,11 +646,37 @@ function applyFavicon(st, badge) {
 function updateTab() {
   const s = tabSession();
   const now = Date.now() + clockSkew;
-  document.title = tabTitle(s, now);
+  const title = tabTitle(s, now);
+  document.title = (tabBlink && tabBlink.phase) ? BLINK_MARK + title : title;
   const st = s ? (s.charState || 'idle') : 'idle';
-  const badge = false;                                 // 배지 판정은 B-4
+  const badge = BADGE_STATES.has(st);                  // (D-12)
   const key = `${st}|${badge}`;
   if (favDrawn !== key) { applyFavicon(st, badge); favDrawn = key; }
+}
+
+function startBlink() {      // document.hidden일 때만 켠다 (FR-5)
+  if (!document.hidden || tabBlink) return;
+  tabBlink = { phase: 0 };
+  updateTab();
+}
+function stopBlink() {       // tabBlink = null 뒤 updateTab()
+  if (!tabBlink) return;
+  tabBlink = null;
+  updateTab();
+}
+
+// 새 스냅샷을 state에 넣기 전에 부른다. prevChar와 비교해 깜빡임을 켜고 prevChar를 갈아 끼운다 (D-3 · D-4)
+function detectTabTransitions(snap) {
+  const top = snap.sessions[0];
+  const next = new Map(snap.sessions.map(x => [x.id, x.charState || 'idle']));
+  if (top) {
+    const before = prevChar.get(top.id), after = next.get(top.id);
+    if (before && before !== after) {                                  // before가 undefined면 전이 아님
+      if (before === 'working' || after === 'broke' || after === 'asking') startBlink();  // 질문 q1
+      // before === 'working' && after === 'asking' 알림 분기는 B-5(notifyAsk)에서 붙인다
+    }
+  }
+  prevChar = next;
 }
 </script>
 </body>
