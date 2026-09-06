@@ -42,6 +42,8 @@
   aside h1 { font-size:13px; letter-spacing:.08em; color:var(--dim); margin:0; padding:14px 16px 8px; text-transform:uppercase; display:flex; align-items:center; justify-content:space-between; gap:6px; }
   aside h1 button { background:none; border:0; color:var(--dim); cursor:pointer; font:16px/1 var(--mono); padding:2px 5px; border-radius:4px; }
   aside h1 button:hover { background:#232836; color:var(--fg); }
+  aside h1 button#notifybtn.off { opacity:.35; }
+  .app.nav-collapsed aside h1 #notifybtn { display:none; }
   .app.nav-collapsed { grid-template-columns: 44px 1fr; }
   .app.nav-collapsed aside h1 { padding:14px 0 8px; justify-content:center; }
   .app.nav-collapsed aside h1 span, .app.nav-collapsed aside .root, .app.nav-collapsed aside #list, .app.nav-collapsed aside #habits { display:none; }
@@ -152,7 +154,7 @@
 <body>
 <div class="app" id="app">
   <aside>
-    <h1><span>Sessions</span><button id="navbtn" title="세션 목록 접기/펼치기">&lsaquo;</button></h1>
+    <h1><span>Sessions</span><button id="notifybtn" title="데스크톱 알림 켜기">&#128276;</button><button id="navbtn" title="세션 목록 접기/펼치기">&lsaquo;</button></h1>
     <div class="root" id="root"></div>
     <div id="list"></div>
     <div id="habits" class="side-habits"></div>
@@ -593,6 +595,11 @@ const FAV_CROP = { zoom: 1, cx: 0.5, cy: 0.5 };        // R-1 우회 손잡이. 
 const BADGE_STATES = new Set(['asking', 'broke']);     // (D-12)
 const BLINK_MARK = '\u{1F514} ';                       // 깜빡일 때 제목 앞에 붙는 종 (D-6)
 const TAB_BASE_TITLE = 'cc-monitor';                   // 세션이 하나도 없을 때 (FR-9)
+const NOTIFY_UI = {                                    // Notification.permission -> [아이콘, 툴팁] (D-14)
+  default: ['\u{1F514}', '데스크톱 알림 켜기'],
+  granted: ['\u{1F514}', '데스크톱 알림 켜짐'],
+  denied:  ['\u{1F515}', '브라우저가 알림을 차단했다'],
+};
 
 let tabBlink = null;         // 깜빡이는 중이면 { phase: 0|1 }, 아니면 null
 let prevChar = new Map();    // sessionId -> 직전 스냅샷의 charState (D-5)
@@ -673,10 +680,32 @@ function detectTabTransitions(snap) {
     const before = prevChar.get(top.id), after = next.get(top.id);
     if (before && before !== after) {                                  // before가 undefined면 전이 아님
       if (before === 'working' || after === 'broke' || after === 'asking') startBlink();  // 질문 q1
-      // before === 'working' && after === 'asking' 알림 분기는 B-5(notifyAsk)에서 붙인다
+      if (after === 'asking') notifyAsk(top);                          // notifyAsk가 hidden·권한을 본다 (질문 q2)
     }
   }
   prevChar = next;
+}
+
+function notifyAsk(s) {          // 권한이 granted일 때만. tag로 세션당 하나 (D-15)
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted' || !document.hidden) return;
+  const n = new Notification(LINES.asking, { body: s.title, icon: '/img/asking.png', tag: `cc-monitor:ask:${s.id}` });
+  n.onclick = () => { window.focus(); n.close(); };
+}
+
+// 버튼 아이콘·툴팁·.off를 Notification.permission에 맞춘다 (D-14)
+function applyNotifyBtn() {
+  const btn = $('#notifybtn'); if (!btn) return;
+  if (typeof Notification === 'undefined') { btn.hidden = true; return; }
+  const [icon, tip] = NOTIFY_UI[Notification.permission] || NOTIFY_UI.default;
+  btn.textContent = icon; btn.title = tip;
+  btn.classList.toggle('off', Notification.permission !== 'granted');
+}
+if ($('#notifybtn')) {
+  applyNotifyBtn();
+  $('#notifybtn').onclick = () => {
+    if (typeof Notification === 'undefined' || Notification.permission === 'denied') return;
+    Notification.requestPermission().then(applyNotifyBtn);
+  };
 }
 </script>
 </body>
