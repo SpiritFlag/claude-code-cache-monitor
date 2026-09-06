@@ -4,6 +4,7 @@
 
 | 버전 | 날짜 | 사이클명 | 종류 | 한 줄 요약 |
 |---|---|---|---|---|
+| v0.1.10 | 2026-09-06 | fix-rule-cleanup-favicon | fix | RULE.md 육안 재현 규칙을 더하고 죽은 코드·favicon 배지 잘림을 고쳤다 |
 | v0.1.9 | 2026-09-06 | enhance-browser-tab | enhance | 브라우저 탭에 캐릭터 아이콘·대사·TTL을 올리고 깜빡임과 알림을 붙였다 |
 | v0.1.8 | 2026-09-06 | enhance-visual-polish | enhance | 상단 Context 바를 여덟 색 층·범례로 바꾸고 그래프 윤곽선을 한 색으로 폈다 |
 | v0.1.7 | 2026-09-06 | enhance-context-graph | enhance | 그래프 x축을 활성시간으로 바꾸고 프롬프트 마커와 원인별 점선 색을 세웠다 |
